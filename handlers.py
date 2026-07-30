@@ -1,0 +1,949 @@
+import asyncio
+import logging
+import os
+import re
+import time
+import uuid
+
+from aiogram import Router, F, Bot
+from aiogram.enums import ChatAction
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.fsm.context import FSMContext
+from aiogram.types import Message, CallbackQuery, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
+from sqlalchemy import select, delete
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from database import Channel
+from sub_service import check_subscriptions
+from states import AddChannelState
+from compose import build_disc
+from processor import get_duration, render_vinyl
+import config
+from texts import (
+    fmt_emoji,
+    STAGE_PREPARING,
+    STAGE_DOWNLOADING_AUDIO,
+    STAGE_DOWNLOADING_THUMBNAIL,
+    STAGE_BUILDING_DISC,
+    STAGE_RENDERING_VIDEO,
+    STAGE_UPLOADING_VIDEO,
+    LOG_PROGRESS_UPDATE_FAILED,
+    LOG_DELETE_FAILED_FMT,
+    LOG_DOWNLOAD_RETRY_FAILED_FMT,
+    LOG_NO_DETAIL_MESSAGE,
+    LOG_QUEUE_PROCESS_FAILED,
+    LOG_PROCESS_JOB_FAILED,
+    LOG_SEND_ERROR_FAILED,
+    LOG_FILE_TOO_LARGE,
+    ERR_NO_THUMBNAIL_AVAILABLE,
+    ERR_OUTPUT_NOT_CREATED,
+    get_msg_audio_received,
+    get_msg_duration_too_long,
+    get_msg_processing_error,
+    get_msg_dev_choose_template,
+    get_msg_start_help,
+    get_msg_template_files_missing,
+    get_msg_no_thumbnail_prompt,
+    get_msg_job_queued,
+    get_msg_queue_canceled_edit,
+    get_msg_queue_canceled_answer,
+    get_msg_send_image_now,
+    get_msg_no_pending_audio,
+    get_msg_audio_expired,
+    get_msg_image_received,
+    MSG_DEV_ONLY_OPTION,
+    get_msg_vinyl_choice_saved_edit,
+    get_msg_vinyl_choice_saved_answer,
+    get_msg_speed_saved_answer,
+    get_msg_wrong_type,
+    get_msg_trim_prompt,
+    get_msg_trim_accepted,
+    get_msg_trim_invalid,
+    get_btn_continue_no_trim,
+    BTN_ADD_IMAGE,
+    BTN_CANCEL,
+    BTN_VINYL_PINK,
+    BTN_VINYL_DEFAULT,
+    BTN_VINYL_YELLOW,
+    BTN_VINYL_BLUE,
+    SPEED_LABEL_FULL,
+    SPEED_LABEL_8RPM,
+    SPEED_LABEL_33RPM,
+    SPEED_LABEL_45RPM,
+    get_btn_add_image,
+    get_btn_cancel,
+    get_btn_vinyl_pink,
+    get_btn_vinyl_default,
+    get_btn_vinyl_yellow,
+    get_btn_vinyl_blue,
+    get_speed_label_full,
+    get_speed_label_8rpm,
+    get_speed_label_33rpm,
+    get_speed_label_45rpm,
+)
+
+logger = logging.getLogger(__name__)
+router = Router()
+
+job_queue: asyncio.Queue[dict] = asyncio.Queue()
+developer_job_queue: asyncio.Queue[dict] = asyncio.Queue()
+worker_tasks: list[asyncio.Task] = []
+pending_images: dict[int, dict] = {}
+pending_audio: dict[int, dict] = {}
+user_rotation_seconds: dict[int, float | None] = {}
+user_pending_jobs: dict[int, set[str]] = {}
+tracked_jobs: dict[str, dict] = {}
+canceled_job_ids: set[str] = set()
+user_vinyl_choice: dict[int, str] = {}
+pending_trim: dict[int, dict] = {}
+
+
+HOURGLASS_FRAMES = ["⏳", "⌛"]
+PROGRESS_BAR_WIDTH = 12
+STATUS_UPDATE_INTERVAL_SECONDS = 2.2
+
+
+def render_progress_bar(percent: float, width: int = PROGRESS_BAR_WIDTH) -> str:
+    percent = max(0.0, min(100.0, percent))
+    filled = int(round(width * percent / 100))
+    return "▓" * filled + "░" * (width - filled)
+
+
+class StatusAnimator:
+    """Telegramdagi holat xabarini davriy yangilaydi: harakatlanuvchi qum soat + matn/progress bar."""
+
+    def __init__(self, message: Message):
+        self.message = message
+        self.stage_text = STAGE_PREPARING
+        self.percent: float | None = None
+        self._frame = 0
+        self._last_rendered: str | None = None
+        self._stop_event = asyncio.Event()
+        self._task: asyncio.Task | None = None
+
+    def set_stage(self, stage_text: str, percent: float | None = None) -> None:
+        self.stage_text = stage_text
+        self.percent = percent
+
+    def _render(self) -> str:
+        raw_frame = HOURGLASS_FRAMES[self._frame % len(HOURGLASS_FRAMES)]
+        hourglass = fmt_emoji(raw_frame, config.EMOJI_HOURGLASS)
+        if self.percent is not None:
+            bar = render_progress_bar(self.percent)
+            return f"{hourglass} {self.stage_text}\n{bar}  {int(self.percent)}%"
+        dots = "." * ((self._frame % 3) + 1)
+        return f"{hourglass} {self.stage_text}{dots}"
+
+    async def _run(self) -> None:
+        while not self._stop_event.is_set():
+            self._frame += 1
+            text = self._render()
+            if text != self._last_rendered:
+                try:
+                    await self.message.edit_text(text)
+                    self._last_rendered = text
+                except TelegramBadRequest:
+                    pass
+                except Exception:
+                    logger.exception(LOG_PROGRESS_UPDATE_FAILED)
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=STATUS_UPDATE_INTERVAL_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+
+    def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.create_task(self._run())
+
+    async def stop(self) -> None:
+        self._stop_event.set()
+        if self._task is not None:
+            try:
+                await self._task
+            except Exception:
+                pass
+
+
+def tmp(name: str) -> str:
+    path = os.path.join(config.TEMP_DIR, name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return path
+
+
+def cleanup(*paths: str) -> None:
+    for p in paths:
+        try:
+            if p and os.path.exists(p):
+                os.remove(p)
+        except OSError as e:
+            logger.warning(LOG_DELETE_FAILED_FMT.format(p=p, e=e))
+
+
+async def download_with_retries(bot: Bot, file_id: str, destination: str,
+                                timeout_seconds: int, retries: int = 3) -> None:
+    last_error: Exception | None = None
+    for attempt in range(1, retries + 1):
+        if os.path.exists(destination):
+            os.remove(destination)
+        try:
+            await bot.download(
+                file_id,
+                destination=destination,
+                timeout=timeout_seconds,
+                chunk_size=64 * 1024,
+            )
+            return
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                LOG_DOWNLOAD_RETRY_FAILED_FMT,
+                attempt, retries, type(exc).__name__, exc or LOG_NO_DETAIL_MESSAGE,
+            )
+            if attempt < retries:
+                await asyncio.sleep(2)
+            else:
+                raise
+    if last_error is not None:
+        raise last_error
+
+
+async def _worker(bot: Bot) -> None:
+    while True:
+        queue = None
+        try:
+            job = developer_job_queue.get_nowait()
+            queue = developer_job_queue
+        except asyncio.QueueEmpty:
+            try:
+                job = job_queue.get_nowait()
+                queue = job_queue
+            except asyncio.QueueEmpty:
+                await asyncio.sleep(0.1)
+                continue
+
+        job_id = job.get("job_id")
+        try:
+            if job_id in canceled_job_ids:
+                canceled_job_ids.discard(job_id)
+                tracked_jobs.pop(job_id, None)
+                user_pending_jobs.get(job.get("uid", 0), set()).discard(job_id)
+                continue
+
+            tracked_jobs[job_id] = job
+            await process_job(bot, job)
+        except Exception:
+            logger.exception(LOG_QUEUE_PROCESS_FAILED)
+        finally:
+            tracked_jobs.pop(job_id, None)
+            user_pending_jobs.get(job.get("uid", 0), set()).discard(job_id)
+            if queue is not None:
+                queue.task_done()
+
+
+async def start_job_worker(bot: Bot) -> None:
+    """MAX_CONCURRENT_JOBS ga mos sonda ishchi (worker) task ishga tushiradi.
+
+    Oldingi versiyada faqat bitta worker ishlab, so'rovlar navbatda ketma-ket
+    (bir vaqtda bittadan) qayta ishlanardi — MAX_CONCURRENT_JOBS sozlamasi
+    e'tiborga olinmasdan qolib ketardi. Endi tugagan tasklar tozalanib,
+    yetishmagan sondagi yangi workerlar qo'shiladi, shu bilan bir nechta
+    fayl haqiqatan ham parallel qayta ishlanadi.
+    """
+    worker_tasks[:] = [t for t in worker_tasks if not t.done()]
+    target = max(1, config.MAX_CONCURRENT_JOBS)
+    while len(worker_tasks) < target:
+        worker_tasks.append(asyncio.create_task(_worker(bot)))
+
+
+def get_user_rotation_seconds(user_id: int) -> float | None:
+    return user_rotation_seconds.get(user_id, config.ROTATION_SECONDS)
+
+
+def get_developer_vinyl_path(user_id: int) -> str:
+    choice = user_vinyl_choice.get(user_id)
+    if choice == "pink":
+        return config.VINYL_PINK_PATH
+    if choice == "yellow":
+        return config.VINYL_YELLOW_PATH
+    if choice == "blue":
+        return config.VINYL_BLUE_PATH
+    return config.VINYL_PATH
+
+
+def get_developer_shadow_path(user_id: int) -> str:
+    choice = user_vinyl_choice.get(user_id)
+    if choice == "pink":
+        return config.SHADOW_PINK_PATH
+    if choice == "yellow":
+        return config.SHADOW_YELLOW_PATH
+    if choice == "blue":
+        return config.SHADOW_BLUE_PATH
+    return config.SHADOW_PATH
+
+
+def get_job_priority(user_id: int) -> int:
+    return 0 if user_id and user_id == config.DEVELOPER_ID else 1
+
+
+def enqueue_job(job: dict) -> None:
+    if get_job_priority(job.get("uid", 0)) == 0:
+        developer_job_queue.put_nowait(job)
+    else:
+        job_queue.put_nowait(job)
+
+
+def cancel_user_jobs(user_id: int) -> None:
+    pending_ids = user_pending_jobs.pop(user_id, set())
+    for job_id in list(pending_ids):
+        canceled_job_ids.add(job_id)
+        job = tracked_jobs.pop(job_id, None)
+        if job:
+            cleanup(*job.get("temp_paths", []))
+
+
+async def process_job(bot: Bot, job: dict) -> None:
+    message = job["message"]
+    audio = job["audio"]
+    uid = job["uid"]
+    job_id = job["job_id"]
+
+    ext = audio.file_name.rsplit(".", 1)[-1] if audio.file_name and "." in audio.file_name else "mp3"
+    audio_path = tmp(f"{uid}_{job_id}_audio.{ext}")
+    thumb_path = tmp(f"{uid}_{job_id}_thumb.jpg")
+    disc_path = tmp(f"{uid}_{job_id}_disc.png")
+    out_path = tmp(f"{uid}_{job_id}_out.mp4")
+    job["temp_paths"] = [audio_path, thumb_path, disc_path, out_path]
+
+    status = await message.reply(get_msg_audio_received(config.EMOJI_HOURGLASS))
+    animator = StatusAnimator(status)
+    animator.start()
+
+    try:
+        await bot.send_chat_action(message.chat.id, action=ChatAction.RECORD_VIDEO_NOTE)
+        animator.set_stage(STAGE_DOWNLOADING_AUDIO)
+        await download_with_retries(bot, audio.file_id, audio_path, timeout_seconds=300, retries=3)
+
+        thumbnail_file_id = None
+        if getattr(audio, "thumbnail", None) is not None:
+            thumbnail_file_id = audio.thumbnail.file_id
+        elif job.get("thumbnail_file_id"):
+            thumbnail_file_id = job["thumbnail_file_id"]
+
+        if thumbnail_file_id:
+            animator.set_stage(STAGE_DOWNLOADING_THUMBNAIL)
+            await download_with_retries(bot, thumbnail_file_id, thumb_path, timeout_seconds=60, retries=2)
+        else:
+            raise ValueError(ERR_NO_THUMBNAIL_AVAILABLE)
+
+        duration = await get_duration(audio_path)
+        start_offset = job.get("start_offset", 0.0)
+        if not job.get("trim_handled") and duration > config.MAX_DURATION_SECONDS:
+            await message.reply(get_msg_duration_too_long(duration, config.EMOJI_WARNING))
+
+        await bot.send_chat_action(message.chat.id, action=ChatAction.UPLOAD_VIDEO_NOTE)
+        animator.set_stage(STAGE_BUILDING_DISC)
+        await asyncio.to_thread(
+            build_disc, thumb_path, get_developer_vinyl_path(uid), disc_path,
+            config.HOLE_RATIO, config.DISC_SIZE,
+        )
+
+        animator.set_stage(STAGE_RENDERING_VIDEO, percent=0)
+
+        async def on_render_progress(percent: float) -> None:
+            animator.set_stage(STAGE_RENDERING_VIDEO, percent=percent)
+
+        await render_vinyl(
+            disc_path, get_developer_shadow_path(uid), audio_path, out_path,
+            rotation_seconds=get_user_rotation_seconds(uid),
+            size=config.DISC_SIZE, fps=config.OUTPUT_FPS,
+            max_duration=config.MAX_DURATION_SECONDS,
+            start_offset=start_offset,
+            on_progress=on_render_progress,
+        )
+        if not os.path.exists(out_path):
+            raise FileNotFoundError(ERR_OUTPUT_NOT_CREATED)
+
+        animator.set_stage(STAGE_UPLOADING_VIDEO, percent=100)
+        await bot.send_chat_action(message.chat.id, action=ChatAction.UPLOAD_VIDEO_NOTE)
+        await message.reply_video_note(FSInputFile(out_path), length=config.DISC_SIZE)
+    except Exception as e:
+        logger.exception(LOG_PROCESS_JOB_FAILED)
+        error_text = str(e) or repr(e) or e.__class__.__name__
+        try:
+            await message.reply(get_msg_processing_error(error_text, config.EMOJI_ERROR))
+        except Exception:
+            logger.exception(LOG_SEND_ERROR_FAILED)
+    finally:
+        await animator.stop()
+        cleanup(audio_path, thumb_path, disc_path, out_path)
+        try:
+            await status.delete()
+        except Exception:
+            pass
+
+
+def build_speed_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    current = get_user_rotation_seconds(user_id)
+    labels = [
+        (get_speed_label_full(config.BTN_EMOJI_SPEED), "full"),
+        (get_speed_label_8rpm(config.BTN_EMOJI_SPEED), "8"),
+        (get_speed_label_33rpm(config.BTN_EMOJI_SPEED), "33"),
+        (get_speed_label_45rpm(config.BTN_EMOJI_SPEED), "45"),
+    ]
+    buttons = []
+    for label, value in labels:
+        if value == "full":
+            selected = current in (None, 0)
+        else:
+            selected = current == (60 / float(value))
+        check_mark = f" {fmt_emoji('✅', config.EMOJI_CHECK)}" if selected else ""
+        btn_style = "success" if selected else "primary"
+
+        btn_emoji = config.BTN_EMOJI_SPEED_ACTIVE if selected else config.BTN_EMOJI_SPEED_INACTIVE
+        if not btn_emoji:
+            btn_emoji = config.BTN_EMOJI_SPEED
+
+        buttons.append(
+            InlineKeyboardButton(
+                text=f"{label}{check_mark}",
+                callback_data=f"speed:{value}",
+                style=btn_style,
+                icon_custom_emoji_id=btn_emoji or None,
+            )
+        )
+    return InlineKeyboardMarkup(inline_keyboard=[buttons[:2], buttons[2:]])
+
+
+@router.message(F.text == "/dev")
+async def on_dev(message: Message):
+    if not message.from_user or message.from_user.id != config.DEVELOPER_ID:
+        return
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=get_btn_vinyl_pink(config.BTN_EMOJI_VINYL_PINK),
+            callback_data="vinyl:pink",
+            style="primary",
+            icon_custom_emoji_id=config.BTN_EMOJI_VINYL_PINK or None,
+        )],
+        [InlineKeyboardButton(
+            text=get_btn_vinyl_default(config.BTN_EMOJI_VINYL_DEFAULT),
+            callback_data="vinyl:default",
+            style="danger",
+            icon_custom_emoji_id=config.BTN_EMOJI_VINYL_DEFAULT or None,
+        )],
+        [InlineKeyboardButton(
+            text=get_btn_vinyl_yellow(config.BTN_EMOJI_VINYL_YELLOW),
+            callback_data="vinyl:yellow",
+            style="primary",
+            icon_custom_emoji_id=config.BTN_EMOJI_VINYL_YELLOW or None,
+        )],
+        [InlineKeyboardButton(
+            text=get_btn_vinyl_blue(config.BTN_EMOJI_VINYL_BLUE),
+            callback_data="vinyl:blue",
+            style="primary",
+            icon_custom_emoji_id=config.BTN_EMOJI_VINYL_BLUE or None,
+        )],
+    ])
+    await message.reply(get_msg_dev_choose_template(config.EMOJI_PALETTE), reply_markup=keyboard)
+
+
+@router.message(F.text.in_({"/start", "/help"}))
+async def on_start(message: Message):
+    await message.reply(
+        get_msg_start_help(config.EMOJI_SPEED),
+        reply_markup=build_speed_keyboard(message.from_user.id if message.from_user else 0),
+    )
+
+
+def build_vinyl_keyboard() -> InlineKeyboardMarkup:
+    """Barcha foydalanuvchilar uchun vinyl rang tanlash klaviaturasi."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=get_btn_vinyl_pink(config.BTN_EMOJI_VINYL_PINK),
+            callback_data="vinyl:pink",
+            style="primary",
+            icon_custom_emoji_id=config.BTN_EMOJI_VINYL_PINK or None,
+        )],
+        [InlineKeyboardButton(
+            text=get_btn_vinyl_default(config.BTN_EMOJI_VINYL_DEFAULT),
+            callback_data="vinyl:default",
+            style="danger",
+            icon_custom_emoji_id=config.BTN_EMOJI_VINYL_DEFAULT or None,
+        )],
+        [InlineKeyboardButton(
+            text=get_btn_vinyl_yellow(config.BTN_EMOJI_VINYL_YELLOW),
+            callback_data="vinyl:yellow",
+            style="primary",
+            icon_custom_emoji_id=config.BTN_EMOJI_VINYL_YELLOW or None,
+        )],
+        [InlineKeyboardButton(
+            text=get_btn_vinyl_blue(config.BTN_EMOJI_VINYL_BLUE),
+            callback_data="vinyl:blue",
+            style="primary",
+            icon_custom_emoji_id=config.BTN_EMOJI_VINYL_BLUE or None,
+        )],
+    ])
+
+
+@router.message(F.text == "/rang")
+async def on_rang(message: Message):
+    """Barcha foydalanuvchilar uchun vinyl rang tanlash."""
+    if not message.from_user:
+        return
+    await message.reply(get_msg_dev_choose_template(config.EMOJI_PALETTE), reply_markup=build_vinyl_keyboard())
+
+
+@router.callback_query(F.data == "check_sub")
+async def on_check_sub(callback: CallbackQuery, bot: Bot, session: AsyncSession):
+    """Foydalanuvchi '✅ A'zo bo'ldim' tugmasini bosganda qayta tekshiradi."""
+    if not callback.from_user:
+        await callback.answer()
+        return
+
+    user_id = callback.from_user.id
+    unsubscribed = await check_subscriptions(bot=bot, user_id=user_id, session=session)
+
+    if unsubscribed:
+        await callback.answer(
+            "❌ Hali barcha kanallarga a'zo bo'lmadingiz!",
+            show_alert=True,
+        )
+    else:
+        await callback.answer("🎉 Rahmat! A'zolik tasdiqlandi.")
+        if callback.message:
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+            await callback.message.answer(
+                get_msg_start_help(config.EMOJI_SPEED),
+                reply_markup=build_speed_keyboard(user_id),
+            )
+
+
+# ============================================================
+# ADMIN PANEL: Majburiy kanallarni boshqarish
+# ============================================================
+
+@router.message(F.text == "/channels")
+async def show_channels_admin(message: Message, session: AsyncSession):
+    """Admin uchun majburiy kanallar ro'yxatini ko'rsatish."""
+    if not message.from_user or message.from_user.id != config.DEVELOPER_ID:
+        return
+
+    stmt = select(Channel)
+    result = await session.execute(stmt)
+    channels = list(result.scalars().all())
+
+    buttons = []
+    for ch in channels:
+        buttons.append([
+            InlineKeyboardButton(text=f"📢 {ch.name}", url=ch.url),
+            InlineKeyboardButton(
+                text="🗑 O'chirish",
+                callback_data=f"del_ch_{ch.id}",
+                style="danger",
+                icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
+            ),
+        ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="➕ Yangi kanal qo'shish",
+            callback_data="add_channel",
+            style="primary",
+            icon_custom_emoji_id=config.BTN_EMOJI_ADD_IMAGE or None,
+        )
+    ])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await message.reply("⚙️ <b>Majburiy kanallarni boshqarish paneli:</b>", reply_markup=kb)
+
+
+@router.callback_query(F.data == "add_channel")
+async def start_add_channel(callback: CallbackQuery, state: FSMContext):
+    """Admin yangi kanal qo'shish tugmasini bosganda FSM ga kirish."""
+    if not callback.from_user or callback.from_user.id != config.DEVELOPER_ID:
+        await callback.answer(MSG_DEV_ONLY_OPTION)
+        return
+
+    await state.set_state(AddChannelState.waiting_for_channel_info)
+    await callback.message.reply(
+        "➕ <b>Yangi kanal qo'shish uchun ma'lumotni kiriting:</b>\n\n"
+        "Format: <code>Kanal Nomi - https://t.me/kanal_link</code>\n\n"
+        "Misol: <code>Mening Kanalim - https://t.me/my_channel</code>"
+    )
+    await callback.answer()
+
+
+@router.message(AddChannelState.waiting_for_channel_info)
+async def process_add_channel(message: Message, state: FSMContext, session: AsyncSession):
+    """Admin yuborgan kanal ma'lumotlarini qabul qilib bazaga saqlash."""
+    if not message.from_user or message.from_user.id != config.DEVELOPER_ID:
+        return
+
+    text = (message.text or "").strip()
+    if " - " not in text:
+        await message.reply(
+            "❌ Noto'g'ri format! Iltimos, <code>Kanal Nomi - https://t.me/link</code> shaklida yuboring."
+        )
+        return
+
+    name, url = text.split(" - ", 1)
+    name = name.strip()
+    url = url.strip()
+
+    new_channel = Channel(name=name, url=url)
+    session.add(new_channel)
+    await session.commit()
+
+    await state.clear()
+    await message.reply(f"✅ <b>'{name}'</b> kanali muvaffaqiyatli bazaga qo'shildi!")
+
+
+@router.callback_query(F.data.startswith("del_ch_"))
+async def delete_channel_callback(callback: CallbackQuery, session: AsyncSession):
+    """Kanalni bazadan o'chirish handler."""
+    if not callback.from_user or callback.from_user.id != config.DEVELOPER_ID:
+        await callback.answer(MSG_DEV_ONLY_OPTION)
+        return
+
+    channel_id = int(callback.data.split("del_ch_")[1])
+    stmt = delete(Channel).where(Channel.id == channel_id)
+    await session.execute(stmt)
+    await session.commit()
+
+    await callback.answer("🗑 Kanal o'chirildi!", show_alert=True)
+    if callback.message:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+
+
+
+@router.message(F.audio)
+async def on_audio(message: Message, bot: Bot):
+    if not message.from_user:
+        return
+
+    if not os.path.exists(config.VINYL_PATH) or not os.path.exists(config.SHADOW_PATH):
+        await message.reply(get_msg_template_files_missing(config.EMOJI_WARNING))
+        return
+
+    audio = message.audio
+    if not audio.thumbnail:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text=get_btn_add_image(config.BTN_EMOJI_ADD_IMAGE),
+                callback_data="add_image",
+                style="primary",
+                icon_custom_emoji_id=config.BTN_EMOJI_ADD_IMAGE or None,
+            )],
+            [InlineKeyboardButton(
+                text=get_btn_cancel(config.BTN_EMOJI_CANCEL),
+                callback_data="cancel_queue",
+                style="danger",
+                icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
+            )],
+        ])
+        await message.reply(
+            get_msg_no_thumbnail_prompt(config.EMOJI_WARNING),
+            reply_markup=keyboard,
+        )
+        pending_audio[message.from_user.id] = {
+            "audio": audio,
+            "message": message,
+            "expires_at": time.time() + 300,
+            "job_id": uuid.uuid4().hex,
+            "uid": message.from_user.id,
+        }
+        pending_images[message.from_user.id] = {"audio_message_id": message.message_id}
+        return
+
+    if audio.file_size and audio.file_size > config.MAX_TELEGRAM_AUDIO_SIZE_BYTES:
+        logger.info(LOG_FILE_TOO_LARGE)
+
+    uid = message.from_user.id
+    job_id = uuid.uuid4().hex
+
+    # Agar audio 60 soniyadan uzun bo'lsa, kesish taklif qilinadi
+    if audio.duration and audio.duration > config.MAX_DURATION_SECONDS:
+        pending_trim[uid] = {
+            "audio": audio,
+            "message": message,
+            "duration": audio.duration,
+            "job_id": job_id,
+            "uid": uid,
+            "expires_at": time.time() + 300,
+        }
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text=get_btn_continue_no_trim(config.BTN_EMOJI_CONTINUE),
+                callback_data="trim_continue",
+                style="success",
+                icon_custom_emoji_id=config.BTN_EMOJI_CONTINUE or None,
+            )],
+            [InlineKeyboardButton(
+                text=get_btn_cancel(config.BTN_EMOJI_CANCEL),
+                callback_data="cancel_queue",
+                style="danger",
+                icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
+            )],
+        ])
+        await message.reply(
+            get_msg_trim_prompt(audio.duration, config.EMOJI_TRIM),
+            reply_markup=keyboard,
+        )
+        return
+
+    await start_job_worker(bot)
+
+    job = {
+        "message": message,
+        "audio": audio,
+        "uid": uid,
+        "job_id": job_id,
+    }
+    tracked_jobs[job_id] = job
+    user_pending_jobs.setdefault(uid, set()).add(job_id)
+    enqueue_job(job)
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text=get_btn_cancel(config.BTN_EMOJI_CANCEL),
+            callback_data="cancel_queue",
+            style="danger",
+            icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
+        )
+    ]])
+    await message.reply(
+        get_msg_job_queued(config.EMOJI_HOURGLASS),
+        reply_markup=keyboard,
+    )
+
+
+@router.callback_query(F.data == "cancel_queue")
+async def on_cancel_queue(callback, bot: Bot):
+    if not callback.from_user:
+        await callback.answer()
+        return
+    cancel_user_jobs(callback.from_user.id)
+    pending_trim.pop(callback.from_user.id, None)
+    await callback.message.edit_text(get_msg_queue_canceled_edit(config.EMOJI_CANCEL))
+    await callback.answer(get_msg_queue_canceled_answer(config.EMOJI_SUCCESS))
+
+
+@router.callback_query(F.data == "add_image")
+async def on_add_image(callback, bot: Bot):
+    if not callback.from_user:
+        await callback.answer()
+        return
+    await callback.message.reply(get_msg_send_image_now(config.EMOJI_CAMERA))
+    pending_images[callback.from_user.id] = {"waiting_for_image": True}
+    await callback.answer()
+
+
+@router.message(F.photo)
+async def on_photo_for_audio(message: Message, bot: Bot):
+    if not message.from_user:
+        return
+
+    pending = pending_images.get(message.from_user.id)
+    if not pending:
+        return
+
+    if pending.get("waiting_for_image"):
+        photo = message.photo[-1]
+        pending_entry = pending_audio.get(message.from_user.id)
+        if not pending_entry:
+            await message.reply(get_msg_no_pending_audio(config.EMOJI_WARNING))
+            return
+
+        if time.time() > pending_entry["expires_at"]:
+            pending_audio.pop(message.from_user.id, None)
+            pending_images.pop(message.from_user.id, None)
+            await message.reply(get_msg_audio_expired(config.EMOJI_TIME))
+            return
+
+        pending_images[message.from_user.id] = {"photo_file_id": photo.file_id, "audio_message_id": pending.get("audio_message_id")}
+
+        job = pending_entry
+        job["thumbnail_file_id"] = photo.file_id
+        job["message"] = pending_entry["message"]
+        job["uid"] = message.from_user.id
+        job["job_id"] = pending_entry["job_id"]
+
+        pending_audio.pop(message.from_user.id, None)
+        pending_images.pop(message.from_user.id, None)
+
+        await message.reply(get_msg_image_received(config.EMOJI_SUCCESS))
+
+        # Agar audio 60 soniyadan uzun — kesish taklif qilish
+        audio_dur = getattr(job["audio"], "duration", 0) or 0
+        if audio_dur > config.MAX_DURATION_SECONDS:
+            pending_trim[message.from_user.id] = {
+                "audio": job["audio"],
+                "message": job["message"],
+                "duration": audio_dur,
+                "job_id": job["job_id"],
+                "uid": job["uid"],
+                "thumbnail_file_id": job.get("thumbnail_file_id"),
+                "expires_at": time.time() + 300,
+            }
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text=get_btn_continue_no_trim(config.BTN_EMOJI_CONTINUE),
+                    callback_data="trim_continue",
+                    style="success",
+                    icon_custom_emoji_id=config.BTN_EMOJI_CONTINUE or None,
+                )],
+                [InlineKeyboardButton(
+                    text=get_btn_cancel(config.BTN_EMOJI_CANCEL),
+                    callback_data="cancel_queue",
+                    style="danger",
+                    icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
+                )],
+            ])
+            await message.reply(
+                get_msg_trim_prompt(audio_dur, config.EMOJI_TRIM),
+                reply_markup=keyboard,
+            )
+            return
+
+        tracked_jobs[job["job_id"]] = job
+        user_pending_jobs.setdefault(job["uid"], set()).add(job["job_id"])
+
+        await start_job_worker(bot)
+        enqueue_job(job)
+        return
+
+
+@router.callback_query(F.data.startswith("vinyl:"))
+async def on_vinyl_choice(callback, bot: Bot):
+    if not callback.from_user:
+        await callback.answer()
+        return
+    choice = callback.data.split(":", 1)[1]
+    if choice in ("pink", "blue", "yellow"):
+        user_vinyl_choice[callback.from_user.id] = choice
+    else:
+        user_vinyl_choice.pop(callback.from_user.id, None)
+    await callback.message.edit_text(get_msg_vinyl_choice_saved_edit(config.EMOJI_PALETTE))
+    await callback.answer(get_msg_vinyl_choice_saved_answer(config.EMOJI_SUCCESS))
+
+
+@router.callback_query(F.data.startswith("speed:"))
+async def on_speed_selected(callback, bot: Bot):
+    if not callback.from_user:
+        await callback.answer()
+        return
+    data = callback.data.split(":", 1)[1]
+    user_id = callback.from_user.id
+    if data == "full":
+        user_rotation_seconds[user_id] = 0.0
+    else:
+        user_rotation_seconds[user_id] = 60 / float(data)
+    await callback.message.edit_reply_markup(reply_markup=build_speed_keyboard(user_id))
+    await callback.answer(get_msg_speed_saved_answer(config.EMOJI_SUCCESS))
+
+
+@router.callback_query(F.data == "trim_continue")
+async def on_trim_continue(callback, bot: Bot):
+    if not callback.from_user:
+        await callback.answer()
+        return
+    uid = callback.from_user.id
+    trim_data = pending_trim.pop(uid, None)
+    if not trim_data:
+        await callback.answer("Kutilayotgan audio topilmadi")
+        return
+
+    await start_job_worker(bot)
+    job = {
+        "message": trim_data["message"],
+        "audio": trim_data["audio"],
+        "uid": uid,
+        "job_id": trim_data["job_id"],
+        "trim_handled": True,
+        "start_offset": 0.0,
+    }
+    if trim_data.get("thumbnail_file_id"):
+        job["thumbnail_file_id"] = trim_data["thumbnail_file_id"]
+    tracked_jobs[job["job_id"]] = job
+    user_pending_jobs.setdefault(uid, set()).add(job["job_id"])
+    enqueue_job(job)
+
+    await callback.message.edit_text(get_msg_job_queued(config.EMOJI_HOURGLASS))
+    await callback.answer()
+
+
+@router.message(F.text)
+async def on_trim_text(message: Message, bot: Bot):
+    """Foydalanuvchi boshlanish:tugash formatida audio kesish oralig'ini yuboradi."""
+    if not message.from_user:
+        return
+    uid = message.from_user.id
+    trim_data = pending_trim.get(uid)
+    if not trim_data:
+        return  # Kutilayotgan kesish yo'q — e'tiborsiz qoldiriladi
+
+    text = (message.text or "").strip()
+    match = re.match(r'^(\d+)\s*:\s*(\d+)$', text)
+    if not match:
+        await message.reply(get_msg_trim_invalid(config.EMOJI_WARNING))
+        return
+
+    start = int(match.group(1))
+    end = int(match.group(2))
+    audio_dur = trim_data["duration"]
+
+    if start < 0 or end <= start or start >= audio_dur:
+        await message.reply(get_msg_trim_invalid(config.EMOJI_WARNING))
+        return
+
+    # Tugash nuqtasini start + 60 bilan chegaralash
+    actual_end = min(end, start + int(config.MAX_DURATION_SECONDS))
+    actual_end = min(actual_end, audio_dur)
+    actual_duration = actual_end - start
+
+    if actual_duration <= 0:
+        await message.reply(get_msg_trim_invalid(config.EMOJI_WARNING))
+        return
+
+    pending_trim.pop(uid)
+
+    await message.reply(get_msg_trim_accepted(start, actual_end, config.EMOJI_SUCCESS))
+
+    await start_job_worker(bot)
+    job = {
+        "message": trim_data["message"],
+        "audio": trim_data["audio"],
+        "uid": uid,
+        "job_id": trim_data["job_id"],
+        "trim_handled": True,
+        "start_offset": float(start),
+    }
+    if trim_data.get("thumbnail_file_id"):
+        job["thumbnail_file_id"] = trim_data["thumbnail_file_id"]
+    tracked_jobs[job["job_id"]] = job
+    user_pending_jobs.setdefault(uid, set()).add(job["job_id"])
+    enqueue_job(job)
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text=get_btn_cancel(config.BTN_EMOJI_CANCEL),
+            callback_data="cancel_queue",
+            style="danger",
+            icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
+        )
+    ]])
+    await message.reply(
+        get_msg_job_queued(config.EMOJI_HOURGLASS),
+        reply_markup=keyboard,
+    )
+
+
+@router.message(F.video | F.voice | F.document)
+async def on_wrong_type(message: Message):
+    await message.reply(get_msg_wrong_type(config.EMOJI_WARNING))
