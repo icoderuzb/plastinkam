@@ -44,7 +44,7 @@ class ForceSubMiddleware(BaseMiddleware):
             icon_check = config.EMOJI_SUCCESS or None
             keyboard_buttons.append([
                 InlineKeyboardButton(
-                    text="✅ A'zo bo'ldim",
+                    text="A'zo bo'ldim" if icon_check else "✅ A'zo bo'ldim",
                     callback_data="check_sub",
                     style="success",
                     icon_custom_emoji_id=icon_check,

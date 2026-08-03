@@ -384,11 +384,12 @@ async def process_job(bot: Bot, job: dict) -> None:
 
 def build_speed_keyboard(user_id: int) -> InlineKeyboardMarkup:
     current = get_user_rotation_seconds(user_id)
+    has_speed_emoji = bool(config.BTN_EMOJI_SPEED_ACTIVE or config.BTN_EMOJI_SPEED_INACTIVE or config.BTN_EMOJI_SPEED)
     labels = [
-        (get_speed_label_full(config.BTN_EMOJI_SPEED), "full"),
-        (get_speed_label_8rpm(config.BTN_EMOJI_SPEED), "8"),
-        (get_speed_label_33rpm(config.BTN_EMOJI_SPEED), "33"),
-        (get_speed_label_45rpm(config.BTN_EMOJI_SPEED), "45"),
+        (get_speed_label_full("yes" if has_speed_emoji else None), "full"),
+        (get_speed_label_8rpm("yes" if has_speed_emoji else None), "8"),
+        (get_speed_label_33rpm("yes" if has_speed_emoji else None), "33"),
+        (get_speed_label_45rpm("yes" if has_speed_emoji else None), "45"),
     ]
     buttons = []
     for label, value in labels:
@@ -396,12 +397,13 @@ def build_speed_keyboard(user_id: int) -> InlineKeyboardMarkup:
             selected = current in (None, 0)
         else:
             selected = current == (60 / float(value))
-        check_mark = f" {fmt_emoji('✅', config.EMOJI_CHECK)}" if selected else ""
         btn_style = "success" if selected else "primary"
 
         btn_emoji = config.BTN_EMOJI_SPEED_ACTIVE if selected else config.BTN_EMOJI_SPEED_INACTIVE
         if not btn_emoji:
             btn_emoji = config.BTN_EMOJI_SPEED
+
+        check_mark = " ✅" if (selected and not btn_emoji) else ""
 
         buttons.append(
             InlineKeyboardButton(

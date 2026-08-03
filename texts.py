@@ -154,8 +154,7 @@ def get_msg_queue_canceled_edit(emoji_id: str | None = None) -> str:
     return f"{icon} Ushbu foydalanuvchi uchun kutilayotgan ishlar bekor qilindi va navbat tozalandi."
 
 def get_msg_queue_canceled_answer(emoji_id: str | None = None) -> str:
-    icon = fmt_emoji("✅", emoji_id)
-    return f"{icon} Kutilayotgan so'rovlar bekor qilindi"
+    return "✅ Kutilayotgan so'rovlar bekor qilindi"
 
 def get_msg_send_image_now(emoji_id: str | None = None) -> str:
     icon = fmt_emoji("📷", emoji_id)
@@ -181,12 +180,10 @@ def get_msg_vinyl_choice_saved_edit(emoji_id: str | None = None) -> str:
     return f"{icon} Disk shabloni tanlovi faqat dasturchi uchun saqlandi"
 
 def get_msg_vinyl_choice_saved_answer(emoji_id: str | None = None) -> str:
-    icon = fmt_emoji("✅", emoji_id)
-    return f"{icon} Tanlov saqlandi"
+    return "✅ Tanlov saqlandi"
 
 def get_msg_speed_saved_answer(emoji_id: str | None = None) -> str:
-    icon = fmt_emoji("✅", emoji_id)
-    return f"{icon} Ushbu foydalanuvchi uchun disk tezligi saqlandi"
+    return "✅ Ushbu foydalanuvchi uchun disk tezligi saqlandi"
 
 def get_msg_wrong_type(emoji_id: str | None = None) -> str:
     icon = fmt_emoji("📌", emoji_id)
@@ -239,8 +236,9 @@ def get_msg_trim_invalid(emoji_id: str | None = None) -> str:
     )
 
 def get_btn_continue_no_trim(emoji_id: str | None = None) -> str:
-    icon = fmt_emoji("▶️", emoji_id)
-    return f"{icon} Davom etish"
+    if emoji_id:
+        return "Davom etish"
+    return "▶️ Davom etish"
 
 BTN_CONTINUE_NO_TRIM = get_btn_continue_no_trim()
 
@@ -248,47 +246,53 @@ BTN_CONTINUE_NO_TRIM = get_btn_continue_no_trim()
 # handlers.py - tugma matnlari (Inline Keyboard buttons Getters & Constants)
 # ============================================================
 def get_btn_add_image(emoji_id: str | None = None) -> str:
-    icon = fmt_emoji("➕", emoji_id)
-    return f"{icon} Rasm qo'shish"
+    if emoji_id:
+        return "Rasm qo'shish"
+    return "➕ Rasm qo'shish"
 
 def get_btn_cancel(emoji_id: str | None = None) -> str:
-    icon = fmt_emoji("❌", emoji_id)
-    return f"{icon} Bekor qilish"
+    if emoji_id:
+        return "Bekor qilish"
+    return "❌ Bekor qilish"
 
 def get_btn_vinyl_pink(emoji_id: str | None = None) -> str:
-    icon = fmt_emoji("💗", emoji_id)
-    return f"{icon} Pushti rangdan foydalanish"
+    if emoji_id:
+        return "Pushti rangdan foydalanish"
+    return "💗 Pushti rangdan foydalanish"
 
 def get_btn_vinyl_default(emoji_id: str | None = None) -> str:
-    icon = fmt_emoji("🔙", emoji_id)
-    return f"{icon} Oddiysidan foydalanish"
+    if emoji_id:
+        return "Oddiysidan foydalanish"
+    return "🔙 Oddiysidan foydalanish"
 
 def get_btn_vinyl_yellow(emoji_id: str | None = None) -> str:
-    icon = fmt_emoji("🟡", emoji_id)
-    return f"{icon} Sariq rang"
+    if emoji_id:
+        return "Sariq rang"
+    return "🟡 Sariq rang"
 
 def get_btn_vinyl_blue(emoji_id: str | None = None) -> str:
-    icon = fmt_emoji("🔵", emoji_id)
-    return f"{icon} Ko'k rang"
+    if emoji_id:
+        return "Ko'k rang"
+    return "🔵 Ko'k rang"
 
 def get_speed_label_full(emoji_id: str | None = None) -> str:
-    if emoji_id:
-        return f"{fmt_emoji('🔄', emoji_id)} To'liq aylanish"
+    if not emoji_id:
+        return "🔄 To'liq aylanish"
     return "To'liq aylanish"
 
 def get_speed_label_8rpm(emoji_id: str | None = None) -> str:
-    if emoji_id:
-        return f"{fmt_emoji('⚡', emoji_id)} 8 RPM"
+    if not emoji_id:
+        return "⚡ 8 RPM"
     return "8 RPM"
 
 def get_speed_label_33rpm(emoji_id: str | None = None) -> str:
-    if emoji_id:
-        return f"{fmt_emoji('⚡', emoji_id)} 33 RPM"
+    if not emoji_id:
+        return "⚡ 33 RPM"
     return "33 RPM"
 
 def get_speed_label_45rpm(emoji_id: str | None = None) -> str:
-    if emoji_id:
-        return f"{fmt_emoji('⚡', emoji_id)} 45 RPM"
+    if not emoji_id:
+        return "⚡ 45 RPM"
     return "45 RPM"
 
 # Standart konstantalar (orqaga moslik uchun)
