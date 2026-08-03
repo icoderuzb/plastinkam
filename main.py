@@ -12,6 +12,8 @@ from middlewares import ForceSubMiddleware
 from texts import LOG_BOT_RUNNING
 
 
+from aiogram.client.session.aiohttp import AiohttpSession
+
 async def main():
     logging.basicConfig(
         level=logging.INFO,
@@ -22,7 +24,8 @@ async def main():
     # 1. Baza va jadvallarni ishga tushirish
     await init_db()
 
-    bot = Bot(config.BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
+    session = AiohttpSession(timeout=300)
+    bot = Bot(config.BOT_TOKEN, session=session, default=DefaultBotProperties(parse_mode="HTML"))
     dp = Dispatcher()
 
     # 2. Database Session Middleware (outer middleware)
