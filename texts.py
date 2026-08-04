@@ -116,7 +116,7 @@ def get_msg_processing_error(error_text: str, emoji_id: str | None = None) -> st
 
 def get_msg_dev_choose_template(emoji_id: str | None = None) -> str:
     icon = fmt_emoji("🎨", emoji_id)
-    return f"{icon} Faqat dasturchi uchun: disk shablonini tanlang:"
+    return f"{icon} <b>Vinyl plastinka rangini tanlang:</b>"
 
 def get_msg_start_help(emoji_id: str | None = None) -> str:
     icon = fmt_emoji("🎛️", emoji_id)
@@ -175,12 +175,26 @@ def get_msg_image_received(emoji_id: str | None = None) -> str:
         "uni qayta yuborish shart emas."
     )
 
-def get_msg_vinyl_choice_saved_edit(emoji_id: str | None = None) -> str:
+def get_msg_vinyl_choice_saved_edit(choice: str = "default", emoji_id: str | None = None) -> str:
     icon = fmt_emoji("🎨", emoji_id)
-    return f"{icon} Disk shabloni tanlovi faqat dasturchi uchun saqlandi"
+    color_map = {
+        "pink": "💗 Pushti",
+        "yellow": "🟡 Sariq",
+        "blue": "🔵 Ko'k",
+        "default": "🖤 Oddiy (Klassik)",
+    }
+    selected = color_map.get(choice, "🖤 Oddiy (Klassik)")
+    return f"{icon} Vinyl rangi tanlandi: <b>{selected}</b>"
 
-def get_msg_vinyl_choice_saved_answer(emoji_id: str | None = None) -> str:
-    return "✅ Tanlov saqlandi"
+def get_msg_vinyl_choice_saved_answer(choice: str = "default", emoji_id: str | None = None) -> str:
+    color_map = {
+        "pink": "💗 Pushti",
+        "yellow": "🟡 Sariq",
+        "blue": "🔵 Ko'k",
+        "default": "🖤 Oddiy",
+    }
+    selected = color_map.get(choice, "🖤 Oddiy")
+    return f"✅ {selected} rang saqlandi"
 
 def get_msg_speed_saved_answer(emoji_id: str | None = None) -> str:
     return "✅ Ushbu foydalanuvchi uchun disk tezligi saqlandi"

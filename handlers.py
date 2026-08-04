@@ -420,33 +420,11 @@ def build_speed_keyboard(user_id: int) -> InlineKeyboardMarkup:
 async def on_dev(message: Message):
     if not message.from_user or message.from_user.id != config.DEVELOPER_ID:
         return
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=get_btn_vinyl_pink(config.BTN_EMOJI_VINYL_PINK),
-            callback_data="vinyl:pink",
-            style="primary",
-            icon_custom_emoji_id=config.BTN_EMOJI_VINYL_PINK or None,
-        )],
-        [InlineKeyboardButton(
-            text=get_btn_vinyl_default(config.BTN_EMOJI_VINYL_DEFAULT),
-            callback_data="vinyl:default",
-            style="danger",
-            icon_custom_emoji_id=config.BTN_EMOJI_VINYL_DEFAULT or None,
-        )],
-        [InlineKeyboardButton(
-            text=get_btn_vinyl_yellow(config.BTN_EMOJI_VINYL_YELLOW),
-            callback_data="vinyl:yellow",
-            style="primary",
-            icon_custom_emoji_id=config.BTN_EMOJI_VINYL_YELLOW or None,
-        )],
-        [InlineKeyboardButton(
-            text=get_btn_vinyl_blue(config.BTN_EMOJI_VINYL_BLUE),
-            callback_data="vinyl:blue",
-            style="primary",
-            icon_custom_emoji_id=config.BTN_EMOJI_VINYL_BLUE or None,
-        )],
-    ])
-    await message.reply(get_msg_dev_choose_template(config.EMOJI_PALETTE), reply_markup=keyboard)
+    current = user_vinyl_choice.get(message.from_user.id, "default")
+    await message.reply(
+        get_msg_dev_choose_template(config.EMOJI_PALETTE),
+        reply_markup=build_vinyl_keyboard(current)
+    )
 
 
 @router.message(F.text.in_({"/start", "/help"}))
@@ -457,29 +435,34 @@ async def on_start(message: Message):
     )
 
 
-def build_vinyl_keyboard() -> InlineKeyboardMarkup:
+def build_vinyl_keyboard(selected_choice: str | None = None) -> InlineKeyboardMarkup:
     """Barcha foydalanuvchilar uchun vinyl rang tanlash klaviaturasi."""
+    def mark(choice_key: str, text: str) -> str:
+        if selected_choice == choice_key:
+            return f"✅ {text}"
+        return text
+
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
-            text=get_btn_vinyl_pink(config.BTN_EMOJI_VINYL_PINK),
+            text=mark("pink", get_btn_vinyl_pink(config.BTN_EMOJI_VINYL_PINK)),
             callback_data="vinyl:pink",
             style="primary",
             icon_custom_emoji_id=config.BTN_EMOJI_VINYL_PINK or None,
         )],
         [InlineKeyboardButton(
-            text=get_btn_vinyl_default(config.BTN_EMOJI_VINYL_DEFAULT),
+            text=mark("default", get_btn_vinyl_default(config.BTN_EMOJI_VINYL_DEFAULT)),
             callback_data="vinyl:default",
             style="danger",
             icon_custom_emoji_id=config.BTN_EMOJI_VINYL_DEFAULT or None,
         )],
         [InlineKeyboardButton(
-            text=get_btn_vinyl_yellow(config.BTN_EMOJI_VINYL_YELLOW),
+            text=mark("yellow", get_btn_vinyl_yellow(config.BTN_EMOJI_VINYL_YELLOW)),
             callback_data="vinyl:yellow",
             style="primary",
             icon_custom_emoji_id=config.BTN_EMOJI_VINYL_YELLOW or None,
         )],
         [InlineKeyboardButton(
-            text=get_btn_vinyl_blue(config.BTN_EMOJI_VINYL_BLUE),
+            text=mark("blue", get_btn_vinyl_blue(config.BTN_EMOJI_VINYL_BLUE)),
             callback_data="vinyl:blue",
             style="primary",
             icon_custom_emoji_id=config.BTN_EMOJI_VINYL_BLUE or None,
@@ -492,7 +475,11 @@ async def on_rang(message: Message):
     """Barcha foydalanuvchilar uchun vinyl rang tanlash."""
     if not message.from_user:
         return
-    await message.reply(get_msg_dev_choose_template(config.EMOJI_PALETTE), reply_markup=build_vinyl_keyboard())
+    current = user_vinyl_choice.get(message.from_user.id, "default")
+    await message.reply(
+        get_msg_dev_choose_template(config.EMOJI_PALETTE),
+        reply_markup=build_vinyl_keyboard(current)
+    )
 
 
 @router.callback_query(F.data == "check_sub")
@@ -826,13 +813,19 @@ async def on_vinyl_choice(callback, bot: Bot):
     if not callback.from_user:
         await callback.answer()
         return
-    choice = callback.data.split(":", 1)[1]
-    if choice in ("pink", "blue", "yellow"):
-        user_vinyl_choice[callback.from_user.id] = choice
+    raw_choice = callback.data.split(":", 1)[1]
+    if raw_choice in ("pink", "blue", "yellow"):
+        user_vinyl_choice[callback.from_user.id] = raw_choice
+        choice = raw_choice
     else:
         user_vinyl_choice.pop(callback.from_user.id, None)
-    await callback.message.edit_text(get_msg_vinyl_choice_saved_edit(config.EMOJI_PALETTE))
-    await callback.answer(get_msg_vinyl_choice_saved_answer(config.EMOJI_SUCCESS))
+        choice = "default"
+
+    await callback.message.edit_text(
+        get_msg_vinyl_choice_saved_edit(choice, config.EMOJI_PALETTE),
+        reply_markup=build_vinyl_keyboard(choice)
+    )
+    await callback.answer(get_msg_vinyl_choice_saved_answer(choice, config.EMOJI_SUCCESS))
 
 
 @router.callback_query(F.data.startswith("speed:"))
