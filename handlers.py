@@ -80,6 +80,9 @@ from texts import (
     get_speed_label_8rpm,
     get_speed_label_33rpm,
     get_speed_label_45rpm,
+    get_msg_change_thumbnail_prompt,
+    get_btn_change_thumbnail_yes,
+    get_btn_keep_thumbnail,
 )
 
 logger = logging.getLogger(__name__)
@@ -324,10 +327,11 @@ async def process_job(bot: Bot, job: dict) -> None:
         await download_with_retries(bot, audio.file_id, audio_path, timeout_seconds=300, retries=3)
 
         thumbnail_file_id = None
-        if getattr(audio, "thumbnail", None) is not None:
-            thumbnail_file_id = audio.thumbnail.file_id
-        elif job.get("thumbnail_file_id"):
+        if job.get("thumbnail_file_id"):
+            # Foydalanuvchi o'zi yuborgan rasm — ustunlik beradi
             thumbnail_file_id = job["thumbnail_file_id"]
+        elif getattr(audio, "thumbnail", None) is not None:
+            thumbnail_file_id = audio.thumbnail.file_id
 
         if thumbnail_file_id:
             animator.set_stage(STAGE_DOWNLOADING_THUMBNAIL)
@@ -686,6 +690,46 @@ async def on_audio(message: Message, bot: Bot):
         )
         return
 
+    # Audio thumbnail bor: foydalanuvchiga rasm o'zgartirish taklifi ko'rsatamiz
+    if audio.thumbnail:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text=get_btn_change_thumbnail_yes(config.BTN_EMOJI_ADD_IMAGE),
+                callback_data="change_thumb",
+                style="primary",
+                icon_custom_emoji_id=config.BTN_EMOJI_ADD_IMAGE or None,
+            )],
+            [InlineKeyboardButton(
+                text=get_btn_keep_thumbnail(config.BTN_EMOJI_CONTINUE),
+                callback_data="keep_thumb",
+                style="success",
+                icon_custom_emoji_id=config.BTN_EMOJI_CONTINUE or None,
+            )],
+            [InlineKeyboardButton(
+                text=get_btn_cancel(config.BTN_EMOJI_CANCEL),
+                callback_data="cancel_queue",
+                style="danger",
+                icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
+            )],
+        ])
+        await message.reply(
+            get_msg_change_thumbnail_prompt(
+                emoji_id_camera=config.EMOJI_CAMERA,
+                emoji_id_music=config.EMOJI_MUSIC,
+            ),
+            reply_markup=keyboard,
+        )
+        # Audiosi bor, thumbnail bor — kutib turadi (change_thumb yoki keep_thumb)
+        pending_audio[uid] = {
+            "audio": audio,
+            "message": message,
+            "expires_at": time.time() + 300,
+            "job_id": job_id,
+            "uid": uid,
+            "has_thumbnail": True,
+        }
+        return
+
     await start_job_worker(bot)
 
     job = {
@@ -719,6 +763,8 @@ async def on_cancel_queue(callback, bot: Bot):
         return
     cancel_user_jobs(callback.from_user.id)
     pending_trim.pop(callback.from_user.id, None)
+    pending_audio.pop(callback.from_user.id, None)
+    pending_images.pop(callback.from_user.id, None)
     await callback.message.edit_text(get_msg_queue_canceled_edit(config.EMOJI_CANCEL))
     await callback.answer(get_msg_queue_canceled_answer(config.EMOJI_SUCCESS))
 
@@ -730,6 +776,89 @@ async def on_add_image(callback, bot: Bot):
         return
     await callback.message.reply(get_msg_send_image_now(config.EMOJI_CAMERA))
     pending_images[callback.from_user.id] = {"waiting_for_image": True}
+    await callback.answer()
+
+
+@router.callback_query(F.data == "keep_thumb")
+async def on_keep_thumb(callback, bot: Bot):
+    """Foydalanuvchi mavjud thumbnail bilan davom etishni tanladi."""
+    if not callback.from_user:
+        await callback.answer()
+        return
+    uid = callback.from_user.id
+    pending_entry = pending_audio.pop(uid, None)
+    if not pending_entry:
+        await callback.answer("Kutilayotgan audio topilmadi", show_alert=True)
+        return
+
+    if time.time() > pending_entry["expires_at"]:
+        await callback.answer("Audio muddati tugadi, qaytadan yuboring", show_alert=True)
+        return
+
+    audio = pending_entry["audio"]
+    job_id = pending_entry["job_id"]
+
+    await callback.message.edit_text(get_msg_job_queued(config.EMOJI_HOURGLASS))
+    await callback.answer()
+
+    # Trim tekshiruvi
+    audio_dur = getattr(audio, "duration", 0) or 0
+    if audio_dur > config.MAX_DURATION_SECONDS:
+        pending_trim[uid] = {
+            "audio": audio,
+            "message": pending_entry["message"],
+            "duration": audio_dur,
+            "job_id": job_id,
+            "uid": uid,
+            "expires_at": time.time() + 300,
+        }
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text=get_btn_continue_no_trim(config.BTN_EMOJI_CONTINUE),
+                callback_data="trim_continue",
+                style="success",
+                icon_custom_emoji_id=config.BTN_EMOJI_CONTINUE or None,
+            )],
+            [InlineKeyboardButton(
+                text=get_btn_cancel(config.BTN_EMOJI_CANCEL),
+                callback_data="cancel_queue",
+                style="danger",
+                icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
+            )],
+        ])
+        await pending_entry["message"].reply(
+            get_msg_trim_prompt(audio_dur, config.EMOJI_TRIM),
+            reply_markup=keyboard,
+        )
+        return
+
+    await start_job_worker(bot)
+    job = {
+        "message": pending_entry["message"],
+        "audio": audio,
+        "uid": uid,
+        "job_id": job_id,
+    }
+    tracked_jobs[job_id] = job
+    user_pending_jobs.setdefault(uid, set()).add(job_id)
+    enqueue_job(job)
+
+
+@router.callback_query(F.data == "change_thumb")
+async def on_change_thumb(callback, bot: Bot):
+    """Foydalanuvchi yangi thumbnail yubormoqchi."""
+    if not callback.from_user:
+        await callback.answer()
+        return
+    uid = callback.from_user.id
+    pending_entry = pending_audio.get(uid)
+    if not pending_entry:
+        await callback.answer("Kutilayotgan audio topilmadi", show_alert=True)
+        return
+
+    # waiting_for_image rejimiga o'tkazamiz
+    pending_images[uid] = {"waiting_for_image": True, "audio_message_id": pending_entry["message"].message_id}
+    await callback.message.reply(get_msg_send_image_now(config.EMOJI_CAMERA))
     await callback.answer()
 
 

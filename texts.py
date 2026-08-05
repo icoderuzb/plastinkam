@@ -203,6 +203,30 @@ def get_msg_wrong_type(emoji_id: str | None = None) -> str:
     icon = fmt_emoji("📌", emoji_id)
     return f"{icon} Audio fayl (Audio) yuboring, video yoki hujjat emas — shundagina uning muqova rasmi mavjud bo'ladi."
 
+
+# ============================================================
+# handlers.py - Thumbnail o'zgartirish taklifi xabarlari
+# ============================================================
+def get_msg_change_thumbnail_prompt(emoji_id_camera: str | None = None, emoji_id_music: str | None = None) -> str:
+    cam = fmt_emoji("🎵", emoji_id_music)
+    return (
+        f"{cam} Audio fayl qabul qilindi!\n\n"
+        "Bu audioda allaqachon muqova rasmi bor. "
+        "<b>Rasmni o'zgartirasizmi?</b>\n\n"
+        "• Yangi rasm tashlamoqchi bo'lsangiz — <b>Ha, o'zgartiraman</b> tugmasini bosing\n"
+        "• Mavjud rasm bilan davom etmoqchi bo'lsangiz — <b>Davom etish</b> tugmasini bosing"
+    )
+
+def get_btn_change_thumbnail_yes(emoji_id: str | None = None) -> str:
+    if emoji_id:
+        return "Ha, o'zgartiraman"
+    return "🖼 Ha, o'zgartiraman"
+
+def get_btn_keep_thumbnail(emoji_id: str | None = None) -> str:
+    if emoji_id:
+        return "Davom etish"
+    return "▶️ Davom etish"
+
 # Standart konstantalar (orqaga moslik uchun)
 MSG_AUDIO_RECEIVED = get_msg_audio_received()
 MSG_DURATION_TOO_LONG_FMT = get_msg_duration_too_long(60)

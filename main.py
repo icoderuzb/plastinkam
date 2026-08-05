@@ -4,6 +4,7 @@ import os
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.telegram import TelegramAPIServer
 
 import config
 from database import DbSessionMiddleware, init_db
@@ -25,7 +26,20 @@ async def main():
     await init_db()
 
     session = AiohttpSession(timeout=300)
-    bot = Bot(config.BOT_TOKEN, session=session, default=DefaultBotProperties(parse_mode="HTML"))
+
+    # Local Telegram API server sozlangan bo'lsa shu manzilni ishlatamiz
+    if config.TELEGRAM_LOCAL_API_URL:
+        local_server = TelegramAPIServer.from_base(
+            config.TELEGRAM_LOCAL_API_URL,
+            is_local=True,   # 2 GB limit, fayllar to'g'ridan-to'g'ri o'qiladi
+        )
+        session = AiohttpSession(api=local_server, timeout=300)
+
+    bot = Bot(
+        config.BOT_TOKEN,
+        session=session,
+        default=DefaultBotProperties(parse_mode="HTML"),
+    )
     dp = Dispatcher()
 
     # 2. Database Session Middleware (outer middleware)

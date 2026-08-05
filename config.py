@@ -17,7 +17,12 @@ DISC_SIZE = int(os.environ.get("DISC_SIZE", 640))
 HOLE_RATIO = float(os.environ.get("HOLE_RATIO", 0.42))
 
 MAX_DURATION_SECONDS = float(os.environ.get("MAX_DURATION_SECONDS", 60))  # Telegram video-note chegarasi
-MAX_TELEGRAM_AUDIO_SIZE_BYTES = int(os.environ.get("MAX_TELEGRAM_AUDIO_SIZE_BYTES", 20 * 1024 * 1024))
+# Local API server ishlatilsa 2GB, aks holda standart 50MB
+MAX_TELEGRAM_AUDIO_SIZE_BYTES = int(os.environ.get("MAX_TELEGRAM_AUDIO_SIZE_BYTES", 2 * 1024 * 1024 * 1024))
+
+# Local Telegram Bot API server manzili (docker-entrypoint-combined.sh orqali ishga tushiriladi)
+# Bo'sh qolsa — rasmiy Telegram API ishlatiladi
+TELEGRAM_LOCAL_API_URL = os.environ.get("TELEGRAM_LOCAL_API_URL", "")
 
 # ============================================================
 # CUSTOM EMOJI CONFIGURATION (Telegram Custom Emoji ID lari)
