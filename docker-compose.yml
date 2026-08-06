@@ -34,6 +34,7 @@ services:
       # Bot ichki tarmoqda local serverni ishlatadi
       TELEGRAM_LOCAL_API_URL: http://telegram-bot-api:8081
     volumes:
+      - tg_api_data:/var/lib/telegram-bot-api
       - ./assets:/app/assets:ro
       - ./temp:/app/temp
     depends_on:
