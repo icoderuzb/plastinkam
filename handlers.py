@@ -441,37 +441,27 @@ async def on_start(message: Message):
 
 def build_vinyl_keyboard(selected_choice: str | None = None) -> InlineKeyboardMarkup:
     """Barcha foydalanuvchilar uchun vinyl rang tanlash klaviaturasi."""
-    def mark(choice_key: str, text: str) -> str:
-        if selected_choice == choice_key:
-            return f"✅ {text}"
-        return text
+    options = [
+        ("pink", get_btn_vinyl_pink(config.BTN_EMOJI_VINYL_PINK), config.BTN_EMOJI_VINYL_PINK, "primary"),
+        ("default", get_btn_vinyl_default(config.BTN_EMOJI_VINYL_DEFAULT), config.BTN_EMOJI_VINYL_DEFAULT, "danger"),
+        ("yellow", get_btn_vinyl_yellow(config.BTN_EMOJI_VINYL_YELLOW), config.BTN_EMOJI_VINYL_YELLOW, "primary"),
+        ("blue", get_btn_vinyl_blue(config.BTN_EMOJI_VINYL_BLUE), config.BTN_EMOJI_VINYL_BLUE, "primary"),
+    ]
 
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=mark("pink", get_btn_vinyl_pink(config.BTN_EMOJI_VINYL_PINK)),
-            callback_data="vinyl:pink",
-            style="primary",
-            icon_custom_emoji_id=config.BTN_EMOJI_VINYL_PINK or None,
-        )],
-        [InlineKeyboardButton(
-            text=mark("default", get_btn_vinyl_default(config.BTN_EMOJI_VINYL_DEFAULT)),
-            callback_data="vinyl:default",
-            style="danger",
-            icon_custom_emoji_id=config.BTN_EMOJI_VINYL_DEFAULT or None,
-        )],
-        [InlineKeyboardButton(
-            text=mark("yellow", get_btn_vinyl_yellow(config.BTN_EMOJI_VINYL_YELLOW)),
-            callback_data="vinyl:yellow",
-            style="primary",
-            icon_custom_emoji_id=config.BTN_EMOJI_VINYL_YELLOW or None,
-        )],
-        [InlineKeyboardButton(
-            text=mark("blue", get_btn_vinyl_blue(config.BTN_EMOJI_VINYL_BLUE)),
-            callback_data="vinyl:blue",
-            style="primary",
-            icon_custom_emoji_id=config.BTN_EMOJI_VINYL_BLUE or None,
-        )],
-    ])
+    rows = []
+    for choice_key, text, emoji_id, default_style in options:
+        selected = (selected_choice == choice_key)
+        style = "success" if selected else default_style
+        check_mark = "✅ " if (selected and not emoji_id) else ""
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{check_mark}{text}",
+                callback_data=f"vinyl:{choice_key}",
+                style=style,
+                icon_custom_emoji_id=emoji_id or None,
+            )
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 @router.message(F.text == "/rang")
