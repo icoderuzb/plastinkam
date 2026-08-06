@@ -93,6 +93,7 @@ developer_job_queue: asyncio.Queue[dict] = asyncio.Queue()
 worker_tasks: list[asyncio.Task] = []
 pending_images: dict[int, dict] = {}
 pending_audio: dict[int, dict] = {}
+user_speed_choice: dict[int, str] = {}
 user_rotation_seconds: dict[int, float | None] = {}
 user_pending_jobs: dict[int, set[str]] = {}
 tracked_jobs: dict[str, dict] = {}
@@ -258,8 +259,21 @@ async def start_job_worker(bot: Bot) -> None:
         worker_tasks.append(asyncio.create_task(_worker(bot)))
 
 
+def get_user_speed_key(user_id: int) -> str:
+    return user_speed_choice.get(user_id, "33")
+
+
 def get_user_rotation_seconds(user_id: int) -> float | None:
-    return user_rotation_seconds.get(user_id, config.ROTATION_SECONDS)
+    key = get_user_speed_key(user_id)
+    if key == "full":
+        return 0.0
+    elif key == "8":
+        return 60 / 8.0
+    elif key == "33":
+        return 60 / 33.333333333333336
+    elif key == "45":
+        return 60 / 45.0
+    return config.ROTATION_SECONDS
 
 
 def get_developer_vinyl_path(user_id: int) -> str:
@@ -387,7 +401,7 @@ async def process_job(bot: Bot, job: dict) -> None:
 
 
 def build_speed_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    current = get_user_rotation_seconds(user_id)
+    current_key = get_user_speed_key(user_id)
     has_speed_emoji = bool(config.BTN_EMOJI_SPEED_ACTIVE or config.BTN_EMOJI_SPEED_INACTIVE or config.BTN_EMOJI_SPEED)
     labels = [
         (get_speed_label_full("yes" if has_speed_emoji else None), "full"),
@@ -397,10 +411,7 @@ def build_speed_keyboard(user_id: int) -> InlineKeyboardMarkup:
     ]
     buttons = []
     for label, value in labels:
-        if value == "full":
-            selected = current in (None, 0)
-        else:
-            selected = current == (60 / float(value))
+        selected = (current_key == value)
         btn_style = "success" if selected else "primary"
 
         btn_emoji = config.BTN_EMOJI_SPEED_ACTIVE if selected else config.BTN_EMOJI_SPEED_INACTIVE
@@ -954,6 +965,7 @@ async def on_speed_selected(callback, bot: Bot):
         return
     data = callback.data.split(":", 1)[1]
     user_id = callback.from_user.id
+    user_speed_choice[user_id] = data
     try:
         await callback.message.edit_reply_markup(reply_markup=build_speed_keyboard(user_id))
     except TelegramBadRequest:
