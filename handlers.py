@@ -183,6 +183,22 @@ def cleanup(*paths: str) -> None:
             logger.warning(LOG_DELETE_FAILED_FMT.format(p=p, e=e))
 
 
+def extract_rel_path(path_str: str) -> str:
+    if not path_str:
+        return ""
+    p = path_str.replace("\\", "/")
+    if "telegram-bot-api/" in p:
+        p = p.split("telegram-bot-api/", 1)[1].lstrip("/")
+        if "/" in p:
+            p = p.split("/", 1)[1]
+        return p
+    if config.BOT_TOKEN and config.BOT_TOKEN in p:
+        p = p.split(config.BOT_TOKEN, 1)[1].lstrip("/")
+        return p
+    p = re.sub(r'^.*?\d+:[^/]+/', '', p)
+    return p.lstrip("/")
+
+
 async def download_file_http(url: str, destination: str, timeout_seconds: int = 300) -> None:
     import aiohttp
     timeout = aiohttp.ClientTimeout(total=timeout_seconds)
@@ -196,44 +212,47 @@ async def download_file_http(url: str, destination: str, timeout_seconds: int = 
 
 async def download_with_retries(bot: Bot, file_id: str, destination: str,
                                 timeout_seconds: int, retries: int = 3) -> None:
-    # Local API mode da birinchi navbatda local diskdan nusxalashni tekshiramiz
-    if config.TELEGRAM_LOCAL_API_URL:
+    # 1. get_file orqali fayl ma'lumotlarini olish
+    local_path = ""
+    try:
+        file_info = await bot.get_file(file_id)
+        local_path = file_info.file_path or ""
+    except Exception as e:
+        logger.warning("bot.get_file(%s) failed: %s", file_id, e)
+
+    # 2. Local diskda mavjud bo'lsa — darhol nusxalaymiz
+    if local_path and os.path.exists(local_path):
         try:
-            file_info = await bot.get_file(file_id)
-            local_path = file_info.file_path or ""
-
-            # a) Local diskda mavjud bo'lsa — darhol copy qilamiz
-            if local_path and os.path.exists(local_path):
-                import shutil as _shutil
-                _shutil.copy2(local_path, destination)
+            import shutil as _shutil
+            _shutil.copy2(local_path, destination)
+            if os.path.exists(destination) and os.path.getsize(destination) > 0:
                 return
+        except Exception as copy_err:
+            logger.warning("Local file copy failed: %s", copy_err)
 
-            # b) Local serverning HTTP fayl manzilidan yuklab olish
-            if local_path:
-                rel_path = local_path
-                if config.BOT_TOKEN in rel_path:
-                    rel_path = rel_path.split(config.BOT_TOKEN, 1)[1].lstrip("/\\")
+    rel_path = extract_rel_path(local_path)
 
-                local_http_url = f"{config.TELEGRAM_LOCAL_API_URL.rstrip('/')}/file/bot{config.BOT_TOKEN}/{rel_path}"
-                try:
-                    await download_file_http(local_http_url, destination, timeout_seconds=timeout_seconds)
-                    if os.path.exists(destination) and os.path.getsize(destination) > 0:
-                        return
-                except Exception as http_err:
-                    logger.warning("Local API HTTP download failed (%s), trying official API fallback...", http_err)
+    # 3. Local Bot API HTTP orqali yuklab olishga urinish
+    if rel_path and config.TELEGRAM_LOCAL_API_URL:
+        local_http_url = f"{config.TELEGRAM_LOCAL_API_URL.rstrip('/')}/file/bot{config.BOT_TOKEN}/{rel_path}"
+        try:
+            await download_file_http(local_http_url, destination, timeout_seconds=timeout_seconds)
+            if os.path.exists(destination) and os.path.getsize(destination) > 0:
+                return
+        except Exception as http_err:
+            logger.warning("Local API HTTP download failed (%s), trying official API fallback...", http_err)
 
-                # c) Rasmiy Telegram HTTPS serveridan fallback yuklash
-                official_url = f"https://api.telegram.org/file/bot{config.BOT_TOKEN}/{rel_path}"
-                try:
-                    await download_file_http(official_url, destination, timeout_seconds=timeout_seconds)
-                    if os.path.exists(destination) and os.path.getsize(destination) > 0:
-                        return
-                except Exception as off_err:
-                    logger.warning("Official API fallback download failed: %s", off_err)
+    # 4. Rasmiy Telegram HTTPS serveridan yuklab olish
+    if rel_path:
+        official_url = f"https://api.telegram.org/file/bot{config.BOT_TOKEN}/{rel_path}"
+        try:
+            await download_file_http(official_url, destination, timeout_seconds=timeout_seconds)
+            if os.path.exists(destination) and os.path.getsize(destination) > 0:
+                return
+        except Exception as off_err:
+            logger.warning("Official API fallback download failed: %s", off_err)
 
-        except Exception as exc:
-            logger.warning("Local API file download failed (%s): %s", type(exc).__name__, exc)
-
+    # 5. Standart bot.download() va qayta urinishlar sikli
     last_error: Exception | None = None
     for attempt in range(1, retries + 1):
         if os.path.exists(destination):
@@ -249,32 +268,6 @@ async def download_with_retries(bot: Bot, file_id: str, destination: str,
                 chunk_size=64 * 1024,
             )
             return
-        except (FileNotFoundError, OSError) as exc:
-            # is_local=True bilan aiogram faylni mahalliy diskdan o'qishga urinadi.
-            # Agar fayl mavjud bo'lmasa, HTTP orqali Local API serveridan yuklab olamiz.
-            logger.warning("bot.download() local path not found: %s — trying HTTP fallback", exc)
-            last_error = exc
-            try:
-                file_info = await bot.get_file(file_id)
-                fp = file_info.file_path or ""
-                if fp:
-                    rel = fp
-                    if config.BOT_TOKEN in rel:
-                        rel = rel.split(config.BOT_TOKEN, 1)[1].lstrip("/\\")
-                    if config.TELEGRAM_LOCAL_API_URL:
-                        http_url = f"{config.TELEGRAM_LOCAL_API_URL.rstrip('/')}/file/bot{config.BOT_TOKEN}/{rel}"
-                    else:
-                        http_url = f"https://api.telegram.org/file/bot{config.BOT_TOKEN}/{rel}"
-                    await download_file_http(http_url, destination, timeout_seconds=timeout_seconds)
-                    if os.path.exists(destination) and os.path.getsize(destination) > 0:
-                        return
-            except Exception as http_err:
-                logger.warning("HTTP fallback after local path failure also failed: %s", http_err)
-                last_error = http_err
-            if attempt < retries:
-                await asyncio.sleep(2)
-            else:
-                raise last_error
         except Exception as exc:
             last_error = exc
             logger.warning(
