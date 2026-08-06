@@ -183,6 +183,34 @@ def cleanup(*paths: str) -> None:
             logger.warning(LOG_DELETE_FAILED_FMT.format(p=p, e=e))
 
 
+def strip_unsupported_button_kwargs(keyboard: InlineKeyboardMarkup) -> InlineKeyboardMarkup:
+    """Telegram rasmiy API serverida (api.telegram.org) style va icon_custom_emoji_id
+    parametrlari bo'lsa Bad Request bermasligi uchun ularni tozalab beradi."""
+    clean_rows = []
+    for row in keyboard.inline_keyboard:
+        clean_row = []
+        for btn in row:
+            kwargs = {}
+            if btn.url:
+                kwargs["url"] = btn.url
+            if btn.callback_data:
+                kwargs["callback_data"] = btn.callback_data
+            clean_row.append(InlineKeyboardButton(text=btn.text, **kwargs))
+        clean_rows.append(clean_row)
+    return InlineKeyboardMarkup(inline_keyboard=clean_rows)
+
+
+async def safe_reply_keyboard(message: Message, text: str, reply_markup: InlineKeyboardMarkup) -> Message:
+    """Tugmali xabar yuboradi: birinchi navbatda premium style/emoji bilan harakat qiladi,
+    agar Telegram API rad etsa, standart tugmalar bilan qayta yuboradi."""
+    try:
+        return await message.reply(text, reply_markup=reply_markup)
+    except TelegramBadRequest as exc:
+        logger.warning("Reply with custom style keyboard failed (%s), retrying with clean keyboard...", exc)
+        clean_markup = strip_unsupported_button_kwargs(reply_markup)
+        return await message.reply(text, reply_markup=clean_markup)
+
+
 def extract_rel_path(path_str: str) -> str:
     if not path_str:
         return ""
@@ -468,7 +496,8 @@ async def process_job(bot: Bot, job: dict) -> None:
                 )],
             ])
 
-            await message.reply(
+            await safe_reply_keyboard(
+                message,
                 get_msg_no_thumbnail_prompt(config.EMOJI_WARNING),
                 reply_markup=keyboard,
             )
@@ -807,7 +836,8 @@ async def on_audio(message: Message, bot: Bot):
                 icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
             )],
         ])
-        await message.reply(
+        await safe_reply_keyboard(
+            message,
             get_msg_trim_prompt(duration, config.EMOJI_TRIM),
             reply_markup=keyboard,
         )
@@ -858,7 +888,7 @@ async def on_audio(message: Message, bot: Bot):
         ])
         prompt_msg = get_msg_no_thumbnail_prompt(config.EMOJI_WARNING)
 
-    await message.reply(prompt_msg, reply_markup=keyboard)
+    await safe_reply_keyboard(message, prompt_msg, reply_markup=keyboard)
 
     pending_audio[uid] = {
         "audio": audio,
@@ -945,7 +975,8 @@ async def on_keep_thumb(callback, bot: Bot):
                 icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
             )],
         ])
-        await pending_entry["message"].reply(
+        await safe_reply_keyboard(
+            pending_entry["message"],
             get_msg_trim_prompt(audio_dur, config.EMOJI_TRIM),
             reply_markup=keyboard,
         )
@@ -1037,7 +1068,8 @@ async def on_photo_for_audio(message: Message, bot: Bot):
                 icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
             )],
         ])
-        await message.reply(
+        await safe_reply_keyboard(
+            message,
             get_msg_trim_prompt(audio_dur, config.EMOJI_TRIM),
             reply_markup=keyboard,
         )
@@ -1176,7 +1208,8 @@ async def on_trim_text(message: Message, bot: Bot):
             icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
         )
     ]])
-    await message.reply(
+    await safe_reply_keyboard(
+        message,
         get_msg_job_queued(config.EMOJI_HOURGLASS),
         reply_markup=keyboard,
     )
