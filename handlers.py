@@ -200,37 +200,37 @@ async def download_with_retries(bot: Bot, file_id: str, destination: str,
     if config.TELEGRAM_LOCAL_API_URL:
         try:
             file_info = await bot.get_file(file_id)
-            local_path = file_info.file_path  # /var/lib/telegram-bot-api/.../file.mp3
+            local_path = file_info.file_path or ""
+
+            # a) Local diskda mavjud bo'lsa — darhol copy qilamiz
             if local_path and os.path.exists(local_path):
                 import shutil as _shutil
                 _shutil.copy2(local_path, destination)
                 return
 
-            # Agar local_path fayli diskda topilmasa (masalan bot local host/Windows-da ishlayotgan bo'lsa),
-            # Local API serveridan HTTP orqali yuklab olamiz:
+            # b) Local serverning HTTP fayl manzilidan yuklab olish
             if local_path:
                 rel_path = local_path
                 if config.BOT_TOKEN in rel_path:
                     rel_path = rel_path.split(config.BOT_TOKEN, 1)[1].lstrip("/\\")
-                http_url = f"{config.TELEGRAM_LOCAL_API_URL.rstrip('/')}/file/bot{config.BOT_TOKEN}/{rel_path}"
 
-                for attempt in range(1, retries + 1):
-                    if os.path.exists(destination):
-                        try:
-                            os.remove(destination)
-                        except OSError:
-                            pass
-                    try:
-                        await download_file_http(http_url, destination, timeout_seconds=timeout_seconds)
-                        if os.path.exists(destination) and os.path.getsize(destination) > 0:
-                            return
-                    except Exception as http_err:
-                        logger.warning(
-                            "Local API HTTP download retry %d/%d failed: %s",
-                            attempt, retries, http_err
-                        )
-                        if attempt < retries:
-                            await asyncio.sleep(2)
+                local_http_url = f"{config.TELEGRAM_LOCAL_API_URL.rstrip('/')}/file/bot{config.BOT_TOKEN}/{rel_path}"
+                try:
+                    await download_file_http(local_http_url, destination, timeout_seconds=timeout_seconds)
+                    if os.path.exists(destination) and os.path.getsize(destination) > 0:
+                        return
+                except Exception as http_err:
+                    logger.warning("Local API HTTP download failed (%s), trying official API fallback...", http_err)
+
+                # c) Rasmiy Telegram HTTPS serveridan fallback yuklash
+                official_url = f"https://api.telegram.org/file/bot{config.BOT_TOKEN}/{rel_path}"
+                try:
+                    await download_file_http(official_url, destination, timeout_seconds=timeout_seconds)
+                    if os.path.exists(destination) and os.path.getsize(destination) > 0:
+                        return
+                except Exception as off_err:
+                    logger.warning("Official API fallback download failed: %s", off_err)
+
         except Exception as exc:
             logger.warning("Local API file download failed (%s): %s", type(exc).__name__, exc)
 
