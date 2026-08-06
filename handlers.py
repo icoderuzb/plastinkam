@@ -792,10 +792,6 @@ async def on_keep_thumb(callback, bot: Bot):
         await callback.answer("Kutilayotgan audio topilmadi", show_alert=True)
         return
 
-    if time.time() > pending_entry["expires_at"]:
-        await callback.answer("Audio muddati tugadi, qaytadan yuboring", show_alert=True)
-        return
-
     audio = pending_entry["audio"]
     job_id = pending_entry["job_id"]
 
@@ -811,7 +807,6 @@ async def on_keep_thumb(callback, bot: Bot):
             "duration": audio_dur,
             "job_id": job_id,
             "uid": uid,
-            "expires_at": time.time() + 300,
         }
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(
@@ -868,74 +863,61 @@ async def on_photo_for_audio(message: Message, bot: Bot):
     if not message.from_user:
         return
 
-    pending = pending_images.get(message.from_user.id)
-    if not pending:
+    uid = message.from_user.id
+    pending_entry = pending_audio.get(uid)
+    if not pending_entry:
         return
 
-    if pending.get("waiting_for_image"):
-        photo = message.photo[-1]
-        pending_entry = pending_audio.get(message.from_user.id)
-        if not pending_entry:
-            await message.reply(get_msg_no_pending_audio(config.EMOJI_WARNING))
-            return
+    photo = message.photo[-1]
 
-        if time.time() > pending_entry["expires_at"]:
-            pending_audio.pop(message.from_user.id, None)
-            pending_images.pop(message.from_user.id, None)
-            await message.reply(get_msg_audio_expired(config.EMOJI_TIME))
-            return
+    job = pending_entry
+    job["thumbnail_file_id"] = photo.file_id
+    job["message"] = pending_entry["message"]
+    job["uid"] = uid
+    job["job_id"] = pending_entry["job_id"]
 
-        pending_images[message.from_user.id] = {"photo_file_id": photo.file_id, "audio_message_id": pending.get("audio_message_id")}
+    pending_audio.pop(uid, None)
+    pending_images.pop(uid, None)
 
-        job = pending_entry
-        job["thumbnail_file_id"] = photo.file_id
-        job["message"] = pending_entry["message"]
-        job["uid"] = message.from_user.id
-        job["job_id"] = pending_entry["job_id"]
+    await message.reply(get_msg_image_received(config.EMOJI_SUCCESS))
 
-        pending_audio.pop(message.from_user.id, None)
-        pending_images.pop(message.from_user.id, None)
-
-        await message.reply(get_msg_image_received(config.EMOJI_SUCCESS))
-
-        # Agar audio 60 soniyadan uzun — kesish taklif qilish
-        audio_dur = getattr(job["audio"], "duration", 0) or 0
-        if audio_dur > config.MAX_DURATION_SECONDS:
-            pending_trim[message.from_user.id] = {
-                "audio": job["audio"],
-                "message": job["message"],
-                "duration": audio_dur,
-                "job_id": job["job_id"],
-                "uid": job["uid"],
-                "thumbnail_file_id": job.get("thumbnail_file_id"),
-                "expires_at": time.time() + 300,
-            }
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(
-                    text=get_btn_continue_no_trim(config.BTN_EMOJI_CONTINUE),
-                    callback_data="trim_continue",
-                    style="success",
-                    icon_custom_emoji_id=config.BTN_EMOJI_CONTINUE or None,
-                )],
-                [InlineKeyboardButton(
-                    text=get_btn_cancel(config.BTN_EMOJI_CANCEL),
-                    callback_data="cancel_queue",
-                    style="danger",
-                    icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
-                )],
-            ])
-            await message.reply(
-                get_msg_trim_prompt(audio_dur, config.EMOJI_TRIM),
-                reply_markup=keyboard,
-            )
-            return
-
-        tracked_jobs[job["job_id"]] = job
-        user_pending_jobs.setdefault(job["uid"], set()).add(job["job_id"])
-
-        await start_job_worker(bot)
-        enqueue_job(job)
+    # Agar audio 60 soniyadan uzun — kesish taklif qilish
+    audio_dur = getattr(job["audio"], "duration", 0) or 0
+    if audio_dur > config.MAX_DURATION_SECONDS:
+        pending_trim[uid] = {
+            "audio": job["audio"],
+            "message": job["message"],
+            "duration": audio_dur,
+            "job_id": job["job_id"],
+            "uid": job["uid"],
+            "thumbnail_file_id": job.get("thumbnail_file_id"),
+        }
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text=get_btn_continue_no_trim(config.BTN_EMOJI_CONTINUE),
+                callback_data="trim_continue",
+                style="success",
+                icon_custom_emoji_id=config.BTN_EMOJI_CONTINUE or None,
+            )],
+            [InlineKeyboardButton(
+                text=get_btn_cancel(config.BTN_EMOJI_CANCEL),
+                callback_data="cancel_queue",
+                style="danger",
+                icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
+            )],
+        ])
+        await message.reply(
+            get_msg_trim_prompt(audio_dur, config.EMOJI_TRIM),
+            reply_markup=keyboard,
+        )
         return
+
+    tracked_jobs[job["job_id"]] = job
+    user_pending_jobs.setdefault(job["uid"], set()).add(job["job_id"])
+
+    await start_job_worker(bot)
+    enqueue_job(job)
+    return
 
 
 @router.callback_query(F.data.startswith("vinyl:"))
