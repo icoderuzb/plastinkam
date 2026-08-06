@@ -427,13 +427,38 @@ async def process_job(bot: Bot, job: dict) -> None:
                 thumb_obtained = True
 
         if not thumb_obtained:
-            # Thumbnail mutlaqo yo'q — foydalanuvchiga tushunarli xabar berib ishni to'xtatamiz
+            # Thumbnail mutlaqo yo'q (Telegram metadata-da ham, MP3 fayl ichida ham rasm yo'q)
             await animator.stop()
             try:
                 await status.delete()
             except Exception:
                 pass
-            await message.reply(get_msg_no_thumbnail_prompt(config.EMOJI_WARNING))
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text=get_btn_add_image(config.BTN_EMOJI_ADD_IMAGE),
+                    callback_data="add_image",
+                )],
+                [InlineKeyboardButton(
+                    text=get_btn_cancel(config.BTN_EMOJI_CANCEL),
+                    callback_data="cancel_queue",
+                )],
+            ])
+
+            await message.reply(
+                get_msg_no_thumbnail_prompt(config.EMOJI_WARNING),
+                reply_markup=keyboard,
+            )
+
+            pending_audio[uid] = {
+                "audio": audio,
+                "message": message,
+                "expires_at": time.time() + 300,
+                "job_id": job_id,
+                "uid": uid,
+                "has_thumbnail": False,
+            }
+            pending_images[uid] = {"waiting_for_image": True, "audio_message_id": message.message_id}
             cleanup(audio_path, thumb_path, disc_path, out_path)
             return
 
