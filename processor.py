@@ -3,6 +3,7 @@ import glob
 import json
 import os
 import shutil
+import tempfile
 from typing import Awaitable, Callable
 
 ProgressCallback = Callable[[float], Awaitable[None]]
@@ -92,7 +93,7 @@ async def render_vinyl(disc_path: str, shadow_path: str, audio_path: str,
 
     video_bps, audio_bps = compute_bitrate_budget(duration)
 
-    trimmed_audio_path = audio_path + ".trim.mp3"
+    trimmed_audio_path = tempfile.mktemp(suffix=".trim.mp3")
     trim_cmd = [FFMPEG, "-y"]
     if start_offset > 0:
         trim_cmd.extend(["-ss", str(start_offset)])

@@ -1,6 +1,7 @@
 import re
 from typing import List
 from aiogram import Bot
+from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,7 +44,11 @@ async def check_subscriptions(bot: Bot, user_id: int, session: AsyncSession) -> 
         chat_identifier = extract_chat_id(ch.url)
         try:
             member = await bot.get_chat_member(chat_id=chat_identifier, user_id=user_id)
-            if member.status in ["left", "kicked", "restricted", "banned"]:
+            if member.status in (
+                ChatMemberStatus.LEFT,
+                ChatMemberStatus.KICKED,
+                ChatMemberStatus.RESTRICTED,
+            ):
                 unsubscribed_channels.append(ch)
         except (TelegramBadRequest, TelegramForbiddenError):
             # Bot kanalda admin emas yoki kanal ommaviy emas/topilmadi

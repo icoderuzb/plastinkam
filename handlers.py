@@ -185,6 +185,18 @@ def cleanup(*paths: str) -> None:
 
 async def download_with_retries(bot: Bot, file_id: str, destination: str,
                                 timeout_seconds: int, retries: int = 3) -> None:
+    # Local API mode da fayllar disk da to'g'ridan-to'g'ri mavjud bo'ladi
+    if config.TELEGRAM_LOCAL_API_URL:
+        try:
+            file_info = await bot.get_file(file_id)
+            local_path = file_info.file_path  # /var/lib/telegram-bot-api/.../file.mp3
+            if local_path and os.path.exists(local_path):
+                import shutil as _shutil
+                _shutil.copy2(local_path, destination)
+                return
+        except Exception as exc:
+            logger.warning("Local API copy failed (%s), falling back to download: %s", type(exc).__name__, exc)
+
     last_error: Exception | None = None
     for attempt in range(1, retries + 1):
         if os.path.exists(destination):
@@ -316,6 +328,13 @@ def cancel_user_jobs(user_id: int) -> None:
         job = tracked_jobs.pop(job_id, None)
         if job:
             cleanup(*job.get("temp_paths", []))
+    # Xotira to'lib ketmasligi uchun eski yozuvlarni tozalab turish
+    _MAX_CANCELED_IDS = 500
+    if len(canceled_job_ids) > _MAX_CANCELED_IDS:
+        # Eng qadimiy yozuvlarni olib tashlash (set tartibsiz, shuning uchun bir qismini o'chiramiz)
+        overflow = len(canceled_job_ids) - _MAX_CANCELED_IDS
+        for old_id in list(canceled_job_ids)[:overflow]:
+            canceled_job_ids.discard(old_id)
 
 
 async def process_job(bot: Bot, job: dict) -> None:
@@ -351,7 +370,15 @@ async def process_job(bot: Bot, job: dict) -> None:
             animator.set_stage(STAGE_DOWNLOADING_THUMBNAIL)
             await download_with_retries(bot, thumbnail_file_id, thumb_path, timeout_seconds=60, retries=2)
         else:
-            raise ValueError(ERR_NO_THUMBNAIL_AVAILABLE)
+            # Thumbnail yo'q — foydalanuvchiga tushunarli xabar berib ishni to'xtatamiz
+            await animator.stop()
+            try:
+                await status.delete()
+            except Exception:
+                pass
+            await message.reply(get_msg_no_thumbnail_prompt(config.EMOJI_WARNING))
+            cleanup(audio_path, thumb_path, disc_path, out_path)
+            return
 
         duration = await get_duration(audio_path)
         start_offset = job.get("start_offset", 0.0)
@@ -657,6 +684,8 @@ async def on_audio(message: Message, bot: Bot):
 
     if audio.file_size and audio.file_size > config.MAX_TELEGRAM_AUDIO_SIZE_BYTES:
         logger.info(LOG_FILE_TOO_LARGE)
+        await message.reply(get_msg_processing_error(LOG_FILE_TOO_LARGE, config.EMOJI_WARNING))
+        return
 
     uid = message.from_user.id
     job_id = uuid.uuid4().hex
@@ -766,7 +795,11 @@ async def on_cancel_queue(callback, bot: Bot):
     pending_trim.pop(callback.from_user.id, None)
     pending_audio.pop(callback.from_user.id, None)
     pending_images.pop(callback.from_user.id, None)
-    await callback.message.edit_text(get_msg_queue_canceled_edit(config.EMOJI_CANCEL))
+    if callback.message:
+        try:
+            await callback.message.edit_text(get_msg_queue_canceled_edit(config.EMOJI_CANCEL))
+        except TelegramBadRequest:
+            pass
     await callback.answer(get_msg_queue_canceled_answer(config.EMOJI_SUCCESS))
 
 
@@ -864,8 +897,16 @@ async def on_photo_for_audio(message: Message, bot: Bot):
         return
 
     uid = message.from_user.id
+
+    # Faqat waiting_for_image rejimida bo'lgandagina qayta ishlaymiz
+    img_pending = pending_images.get(uid)
+    if not img_pending or not img_pending.get("waiting_for_image"):
+        return
+
     pending_entry = pending_audio.get(uid)
     if not pending_entry:
+        # Audio yo'q — rasmni e'tiborsiz qoldiramiz
+        pending_images.pop(uid, None)
         return
 
     photo = message.photo[-1]
