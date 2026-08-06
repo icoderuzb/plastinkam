@@ -227,6 +227,19 @@ def extract_rel_path(path_str: str) -> str:
     return p.lstrip("/")
 
 
+async def get_file_info_official_api(file_id: str, timeout_seconds: int = 30) -> str:
+    """Rasmiy Telegram Bot API HTTPS serveridan getFile orqali file_path ni olib beradi."""
+    import aiohttp
+    url = f"https://api.telegram.org/bot{config.BOT_TOKEN}/getFile?file_id={file_id}"
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(url) as resp:
+            data = await resp.json()
+            if isinstance(data, dict) and data.get("ok") and "result" in data:
+                return data["result"].get("file_path", "")
+    return ""
+
+
 async def download_file_http(url: str, destination: str, timeout_seconds: int = 300) -> None:
     import aiohttp
     timeout = aiohttp.ClientTimeout(total=timeout_seconds)
@@ -270,7 +283,7 @@ async def download_with_retries(bot: Bot, file_id: str, destination: str,
         except Exception as http_err:
             logger.warning("Local API HTTP download failed (%s), trying official API fallback...", http_err)
 
-    # 4. Rasmiy Telegram HTTPS serveridan yuklab olish
+    # 4. Rasmiy Telegram HTTPS serveridan (rel_path orqali) yuklab olish
     if rel_path:
         official_url = f"https://api.telegram.org/file/bot{config.BOT_TOKEN}/{rel_path}"
         try:
@@ -280,7 +293,19 @@ async def download_with_retries(bot: Bot, file_id: str, destination: str,
         except Exception as off_err:
             logger.warning("Official API fallback download failed: %s", off_err)
 
-    # 5. Standart bot.download() va qayta urinishlar sikli
+    # 5. Local API get_file omadsiz bo'lsa — Rasmiy Telegram API getFile bilan sinash
+    try:
+        official_fp = await get_file_info_official_api(file_id, timeout_seconds=30)
+        official_rel = extract_rel_path(official_fp)
+        if official_rel:
+            official_url = f"https://api.telegram.org/file/bot{config.BOT_TOKEN}/{official_rel}"
+            await download_file_http(official_url, destination, timeout_seconds=timeout_seconds)
+            if os.path.exists(destination) and os.path.getsize(destination) > 0:
+                return
+    except Exception as off_get_err:
+        logger.warning("Official API getFile fallback failed: %s", off_get_err)
+
+    # 6. Standart bot.download() va qayta urinishlar sikli
     last_error: Exception | None = None
     for attempt in range(1, retries + 1):
         if os.path.exists(destination):
