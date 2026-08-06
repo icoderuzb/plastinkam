@@ -58,6 +58,52 @@ async def get_duration(path: str) -> float:
     return float(json.loads(out)["format"]["duration"])
 
 
+async def extract_embedded_cover(audio_path: str, out_image_path: str) -> bool:
+    """Audio fayl ichidagi ichki albom rasmini (embedded cover art/ID3 tag) ffmpeg orqali ajratib oladi."""
+    if not os.path.exists(audio_path):
+        return False
+
+    cmd_jpg = [
+        FFMPEG, "-y",
+        "-i", audio_path,
+        "-an",
+        "-vcodec", "mjpeg",
+        "-ss", "0",
+        "-frames:v", "1",
+        out_image_path,
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd_jpg, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+        )
+        await proc.communicate()
+        if proc.returncode == 0 and os.path.exists(out_image_path) and os.path.getsize(out_image_path) > 0:
+            return True
+    except Exception:
+        pass
+
+    cmd_png = [
+        FFMPEG, "-y",
+        "-i", audio_path,
+        "-an",
+        "-vcodec", "png",
+        "-ss", "0",
+        "-frames:v", "1",
+        out_image_path,
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd_png, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+        )
+        await proc.communicate()
+        if proc.returncode == 0 and os.path.exists(out_image_path) and os.path.getsize(out_image_path) > 0:
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
 def compute_bitrate_budget(duration: float) -> tuple[int, int]:
     """Natijaviy hajm Telegram chegarasidan oshmasligi uchun video/audio bitreytni (bps) hisoblaydi."""
     duration = max(duration, 1.0)
@@ -72,8 +118,6 @@ def compute_bitrate_budget(duration: float) -> tuple[int, int]:
         audio_bps = MIN_AUDIO_BITRATE_BPS
 
     return video_bps, audio_bps
-
-
 async def render_vinyl(disc_path: str, shadow_path: str, audio_path: str,
                         out_path: str, rotation_seconds: float | None = 4,
                         size: int = 640, fps: int = 30,
@@ -89,55 +133,101 @@ async def render_vinyl(disc_path: str, shadow_path: str, audio_path: str,
     duration = min(duration, max_duration)  # aylana video-note uchun Telegram chegarasi
 
     if rotation_seconds is None or rotation_seconds <= 0:
-        rotation_seconds = duration if duration > 0 else 4
+        rotation_seconds = 4.0
 
     video_bps, audio_bps = compute_bitrate_budget(duration)
 
     trimmed_audio_path = tempfile.mktemp(suffix=".trim.mp3")
-    trim_cmd = [FFMPEG, "-y"]
-    if start_offset > 0:
-        trim_cmd.extend(["-ss", str(start_offset)])
-    trim_cmd.extend([
-        "-i", audio_path,
-        "-vn",
-        "-acodec", "libmp3lame",
-        "-t", str(duration),
-        trimmed_audio_path,
-    ])
-    trim_proc = await asyncio.create_subprocess_exec(
-        *trim_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
-    )
-    _, trim_err = await trim_proc.communicate()
-    if trim_proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg audio qisqartirish xatoligi: {trim_err.decode(errors='ignore')[-500:]}")
-
-    filt = (
-        f"[1:v]format=rgba,rotate=2*PI*t/{rotation_seconds}:c=none:ow={size}:oh={size}[spin];"
-        f"[spin][2:v]overlay=0:0:format=auto[vout]"
-    )
-
-    cmd = [
-        FFMPEG, "-y",
-        "-i", trimmed_audio_path,
-        "-loop", "1", "-i", disc_path,
-        "-loop", "1", "-i", shadow_path,
-        "-filter_complex", filt,
-        "-map", "[vout]", "-map", "0:a",
-        "-c:v", "libx264", "-preset", "veryfast",
-        "-b:v", str(video_bps), "-maxrate", str(int(video_bps * 1.15)),
-        "-bufsize", str(video_bps * 2),
-        "-c:a", "aac", "-b:a", str(audio_bps),
-        "-t", str(duration),
-        "-r", str(fps),
-        "-pix_fmt", "yuv420p",
-        "-movflags", "+faststart",
-        "-progress", "pipe:1", "-nostats",
-        out_path,
-    ]
+    loop_path = tempfile.mktemp(suffix=".loop.mp4")
 
     try:
+        # 1. Audio trim & conversion
+        trim_cmd = [FFMPEG, "-y"]
+        if start_offset > 0:
+            trim_cmd.extend(["-ss", str(start_offset)])
+        trim_cmd.extend([
+            "-i", audio_path,
+            "-vn",
+            "-acodec", "libmp3lame",
+            "-threads", "0",
+            "-t", str(duration),
+            trimmed_audio_path,
+        ])
+        trim_proc = await asyncio.create_subprocess_exec(
+            *trim_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _, trim_err = await trim_proc.communicate()
+        if trim_proc.returncode != 0:
+            raise RuntimeError(f"ffmpeg audio qisqartirish xatoligi: {trim_err.decode(errors='ignore')[-500:]}")
+
+        # 2. Render 1 seamless rotation loop (fast 4-second loop render)
+        loop_dur = min(rotation_seconds, duration)
+        filt_loop = (
+            f"[0:v]format=rgba,rotate=2*PI*t/{rotation_seconds}:c=none:ow={size}:oh={size}[spin];"
+            f"[spin][1:v]overlay=0:0:format=auto[vout]"
+        )
+        cmd_loop = [
+            FFMPEG, "-y",
+            "-loop", "1", "-i", disc_path,
+            "-loop", "1", "-i", shadow_path,
+            "-filter_complex", filt_loop,
+            "-map", "[vout]",
+            "-c:v", "libx264", "-preset", "ultrafast",
+            "-threads", "0",
+            "-b:v", str(video_bps), "-maxrate", str(int(video_bps * 1.15)),
+            "-bufsize", str(video_bps * 2),
+            "-t", str(loop_dur),
+            "-r", str(fps),
+            "-pix_fmt", "yuv420p",
+            loop_path,
+        ]
+        loop_proc = await asyncio.create_subprocess_exec(
+            *cmd_loop, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        await loop_proc.communicate()
+
+        # 3. Stream loop video with audio (ultra-fast stream copy)
+        if loop_proc.returncode == 0 and os.path.exists(loop_path) and os.path.getsize(loop_path) > 0:
+            cmd_final = [
+                FFMPEG, "-y",
+                "-stream_loop", "-1", "-i", loop_path,
+                "-i", trimmed_audio_path,
+                "-c:v", "copy",
+                "-c:a", "aac", "-b:a", str(audio_bps),
+                "-t", str(duration),
+                "-map", "0:v", "-map", "1:a",
+                "-movflags", "+faststart",
+                "-threads", "0",
+                "-progress", "pipe:1", "-nostats",
+                out_path,
+            ]
+        else:
+            filt = (
+                f"[1:v]format=rgba,rotate=2*PI*t/{rotation_seconds}:c=none:ow={size}:oh={size}[spin];"
+                f"[spin][2:v]overlay=0:0:format=auto[vout]"
+            )
+            cmd_final = [
+                FFMPEG, "-y",
+                "-i", trimmed_audio_path,
+                "-loop", "1", "-i", disc_path,
+                "-loop", "1", "-i", shadow_path,
+                "-filter_complex", filt,
+                "-map", "[vout]", "-map", "0:a",
+                "-c:v", "libx264", "-preset", "ultrafast",
+                "-threads", "0",
+                "-b:v", str(video_bps), "-maxrate", str(int(video_bps * 1.15)),
+                "-bufsize", str(video_bps * 2),
+                "-c:a", "aac", "-b:a", str(audio_bps),
+                "-t", str(duration),
+                "-r", str(fps),
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                "-progress", "pipe:1", "-nostats",
+                out_path,
+            ]
+
         proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            *cmd_final, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
 
         stderr_chunks: list[bytes] = []
@@ -177,17 +267,19 @@ async def render_vinyl(disc_path: str, shadow_path: str, audio_path: str,
         returncode = await proc.wait()
         if returncode != 0:
             raise RuntimeError(f"ffmpeg xatoligi: {b''.join(stderr_chunks).decode(errors='ignore')[-500:]}")
+
     finally:
-        # Qisqartirilgan audio fayl faqat ichki oraliq fayl — muvaffaqiyatli
-        # yoki muvaffaqiyatsiz bo'lishidan qat'i nazar har doim o'chiriladi
         if os.path.exists(trimmed_audio_path):
             try:
                 os.remove(trimmed_audio_path)
             except OSError:
                 pass
+        if os.path.exists(loop_path):
+            try:
+                os.remove(loop_path)
+            except OSError:
+                pass
 
-    # Qo'shimcha himoya: agar yakuniy hajm baribir Telegram chegarasidan
-    # katta chiqsa (kamdan-kam holat), aniq xatolik chiqaramiz
     actual_size = os.path.getsize(out_path)
     if actual_size > TELEGRAM_VIDEO_NOTE_MAX_BYTES:
         raise RuntimeError(

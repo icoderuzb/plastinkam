@@ -17,7 +17,7 @@ from database import Channel
 from sub_service import check_subscriptions
 from states import AddChannelState
 from compose import build_disc
-from processor import get_duration, render_vinyl
+from processor import get_duration, render_vinyl, extract_embedded_cover
 import config
 from texts import (
     fmt_emoji,
@@ -183,9 +183,20 @@ def cleanup(*paths: str) -> None:
             logger.warning(LOG_DELETE_FAILED_FMT.format(p=p, e=e))
 
 
+async def download_file_http(url: str, destination: str, timeout_seconds: int = 300) -> None:
+    import aiohttp
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(url) as resp:
+            resp.raise_for_status()
+            with open(destination, "wb") as f:
+                async for chunk in resp.content.iter_chunked(64 * 1024):
+                    f.write(chunk)
+
+
 async def download_with_retries(bot: Bot, file_id: str, destination: str,
                                 timeout_seconds: int, retries: int = 3) -> None:
-    # Local API mode da fayllar disk da to'g'ridan-to'g'ri mavjud bo'ladi
+    # Local API mode da birinchi navbatda local diskdan nusxalashni tekshiramiz
     if config.TELEGRAM_LOCAL_API_URL:
         try:
             file_info = await bot.get_file(file_id)
@@ -194,13 +205,42 @@ async def download_with_retries(bot: Bot, file_id: str, destination: str,
                 import shutil as _shutil
                 _shutil.copy2(local_path, destination)
                 return
+
+            # Agar local_path fayli diskda topilmasa (masalan bot local host/Windows-da ishlayotgan bo'lsa),
+            # Local API serveridan HTTP orqali yuklab olamiz:
+            if local_path:
+                rel_path = local_path
+                if config.BOT_TOKEN in rel_path:
+                    rel_path = rel_path.split(config.BOT_TOKEN, 1)[1].lstrip("/\\")
+                http_url = f"{config.TELEGRAM_LOCAL_API_URL.rstrip('/')}/file/bot{config.BOT_TOKEN}/{rel_path}"
+
+                for attempt in range(1, retries + 1):
+                    if os.path.exists(destination):
+                        try:
+                            os.remove(destination)
+                        except OSError:
+                            pass
+                    try:
+                        await download_file_http(http_url, destination, timeout_seconds=timeout_seconds)
+                        if os.path.exists(destination) and os.path.getsize(destination) > 0:
+                            return
+                    except Exception as http_err:
+                        logger.warning(
+                            "Local API HTTP download retry %d/%d failed: %s",
+                            attempt, retries, http_err
+                        )
+                        if attempt < retries:
+                            await asyncio.sleep(2)
         except Exception as exc:
-            logger.warning("Local API copy failed (%s), falling back to download: %s", type(exc).__name__, exc)
+            logger.warning("Local API file download failed (%s): %s", type(exc).__name__, exc)
 
     last_error: Exception | None = None
     for attempt in range(1, retries + 1):
         if os.path.exists(destination):
-            os.remove(destination)
+            try:
+                os.remove(destination)
+            except OSError:
+                pass
         try:
             await bot.download(
                 file_id,
@@ -343,7 +383,8 @@ async def process_job(bot: Bot, job: dict) -> None:
     uid = job["uid"]
     job_id = job["job_id"]
 
-    ext = audio.file_name.rsplit(".", 1)[-1] if audio.file_name and "." in audio.file_name else "mp3"
+    fname = getattr(audio, "file_name", None) or ""
+    ext = fname.rsplit(".", 1)[-1] if "." in fname else "mp3"
     audio_path = tmp(f"{uid}_{job_id}_audio.{ext}")
     thumb_path = tmp(f"{uid}_{job_id}_thumb.jpg")
     disc_path = tmp(f"{uid}_{job_id}_disc.png")
@@ -363,14 +404,30 @@ async def process_job(bot: Bot, job: dict) -> None:
         if job.get("thumbnail_file_id"):
             # Foydalanuvchi o'zi yuborgan rasm — ustunlik beradi
             thumbnail_file_id = job["thumbnail_file_id"]
-        elif getattr(audio, "thumbnail", None) is not None:
-            thumbnail_file_id = audio.thumbnail.file_id
+        else:
+            thumb_obj = getattr(audio, "thumbnail", None) or getattr(audio, "thumb", None)
+            if thumb_obj is not None:
+                thumbnail_file_id = getattr(thumb_obj, "file_id", None)
 
+        thumb_obtained = False
         if thumbnail_file_id:
             animator.set_stage(STAGE_DOWNLOADING_THUMBNAIL)
-            await download_with_retries(bot, thumbnail_file_id, thumb_path, timeout_seconds=60, retries=2)
-        else:
-            # Thumbnail yo'q — foydalanuvchiga tushunarli xabar berib ishni to'xtatamiz
+            try:
+                await download_with_retries(bot, thumbnail_file_id, thumb_path, timeout_seconds=60, retries=2)
+                if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 0:
+                    thumb_obtained = True
+            except Exception as e:
+                logger.warning("Thumbnail download failed: %s", e)
+
+        if not thumb_obtained:
+            # Faylning o'zidan ichki muqova rasmini (embedded cover art/ID3 tag) ajratib olishga harakat qilamiz
+            animator.set_stage(STAGE_DOWNLOADING_THUMBNAIL)
+            extracted = await extract_embedded_cover(audio_path, thumb_path)
+            if extracted:
+                thumb_obtained = True
+
+        if not thumb_obtained:
+            # Thumbnail mutlaqo yo'q — foydalanuvchiga tushunarli xabar berib ishni to'xtatamiz
             await animator.stop()
             try:
                 await status.delete()
@@ -643,46 +700,33 @@ async def delete_channel_callback(callback: CallbackQuery, session: AsyncSession
 
 
 
-@router.message(F.audio)
+@router.message(F.audio | F.document)
 async def on_audio(message: Message, bot: Bot):
     if not message.from_user:
+        return
+
+    if message.document:
+        doc = message.document
+        mime = doc.mime_type or ""
+        fname = doc.file_name or ""
+        is_audio = mime.startswith("audio/") or fname.lower().endswith(
+            (".mp3", ".m4a", ".flac", ".wav", ".ogg", ".aac", ".opus", ".wma")
+        )
+        if not is_audio:
+            return
+        audio = doc
+    else:
+        audio = message.audio
+
+    if not audio:
         return
 
     if not os.path.exists(config.VINYL_PATH) or not os.path.exists(config.SHADOW_PATH):
         await message.reply(get_msg_template_files_missing(config.EMOJI_WARNING))
         return
 
-    audio = message.audio
-    if not audio.thumbnail:
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(
-                text=get_btn_add_image(config.BTN_EMOJI_ADD_IMAGE),
-                callback_data="add_image",
-                style="primary",
-                icon_custom_emoji_id=config.BTN_EMOJI_ADD_IMAGE or None,
-            )],
-            [InlineKeyboardButton(
-                text=get_btn_cancel(config.BTN_EMOJI_CANCEL),
-                callback_data="cancel_queue",
-                style="danger",
-                icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
-            )],
-        ])
-        await message.reply(
-            get_msg_no_thumbnail_prompt(config.EMOJI_WARNING),
-            reply_markup=keyboard,
-        )
-        pending_audio[message.from_user.id] = {
-            "audio": audio,
-            "message": message,
-            "expires_at": time.time() + 300,
-            "job_id": uuid.uuid4().hex,
-            "uid": message.from_user.id,
-        }
-        pending_images[message.from_user.id] = {"audio_message_id": message.message_id}
-        return
-
-    if audio.file_size and audio.file_size > config.MAX_TELEGRAM_AUDIO_SIZE_BYTES:
+    file_size = getattr(audio, "file_size", None)
+    if file_size and file_size > config.MAX_TELEGRAM_AUDIO_SIZE_BYTES:
         logger.info(LOG_FILE_TOO_LARGE)
         await message.reply(get_msg_processing_error(LOG_FILE_TOO_LARGE, config.EMOJI_WARNING))
         return
@@ -691,11 +735,12 @@ async def on_audio(message: Message, bot: Bot):
     job_id = uuid.uuid4().hex
 
     # Agar audio 60 soniyadan uzun bo'lsa, kesish taklif qilinadi
-    if audio.duration and audio.duration > config.MAX_DURATION_SECONDS:
+    duration = getattr(audio, "duration", 0) or 0
+    if duration > config.MAX_DURATION_SECONDS:
         pending_trim[uid] = {
             "audio": audio,
             "message": message,
-            "duration": audio.duration,
+            "duration": duration,
             "job_id": job_id,
             "uid": uid,
             "expires_at": time.time() + 300,
@@ -715,50 +760,55 @@ async def on_audio(message: Message, bot: Bot):
             )],
         ])
         await message.reply(
-            get_msg_trim_prompt(audio.duration, config.EMOJI_TRIM),
+            get_msg_trim_prompt(duration, config.EMOJI_TRIM),
             reply_markup=keyboard,
         )
         return
 
-    # Audio thumbnail bor: foydalanuvchiga rasm o'zgartirish taklifi ko'rsatamiz
-    if audio.thumbnail:
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(
-                text=get_btn_change_thumbnail_yes(config.BTN_EMOJI_ADD_IMAGE),
-                callback_data="change_thumb",
-                style="primary",
-                icon_custom_emoji_id=config.BTN_EMOJI_ADD_IMAGE or None,
-            )],
-            [InlineKeyboardButton(
-                text=get_btn_keep_thumbnail(config.BTN_EMOJI_CONTINUE),
-                callback_data="keep_thumb",
-                style="success",
-                icon_custom_emoji_id=config.BTN_EMOJI_CONTINUE or None,
-            )],
-            [InlineKeyboardButton(
-                text=get_btn_cancel(config.BTN_EMOJI_CANCEL),
-                callback_data="cancel_queue",
-                style="danger",
-                icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
-            )],
-        ])
-        await message.reply(
-            get_msg_change_thumbnail_prompt(
-                emoji_id_camera=config.EMOJI_CAMERA,
-                emoji_id_music=config.EMOJI_MUSIC,
-            ),
-            reply_markup=keyboard,
+    # Audio thumbnail borligi tekshiriladi (Telegram thumbnail yoki fayl ichidagi rasm bilan davom etish tanlovi)
+    has_thumb = bool(getattr(audio, "thumbnail", None) or getattr(audio, "thumb", None))
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=get_btn_change_thumbnail_yes(config.BTN_EMOJI_ADD_IMAGE) if has_thumb else get_btn_add_image(config.BTN_EMOJI_ADD_IMAGE),
+            callback_data="change_thumb" if has_thumb else "add_image",
+            style="primary",
+            icon_custom_emoji_id=config.BTN_EMOJI_ADD_IMAGE or None,
+        )],
+        [InlineKeyboardButton(
+            text=get_btn_keep_thumbnail(config.BTN_EMOJI_CONTINUE),
+            callback_data="keep_thumb",
+            style="success",
+            icon_custom_emoji_id=config.BTN_EMOJI_CONTINUE or None,
+        )],
+        [InlineKeyboardButton(
+            text=get_btn_cancel(config.BTN_EMOJI_CANCEL),
+            callback_data="cancel_queue",
+            style="danger",
+            icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
+        )],
+    ])
+
+    prompt_msg = (
+        get_msg_change_thumbnail_prompt(
+            emoji_id_camera=config.EMOJI_CAMERA,
+            emoji_id_music=config.EMOJI_MUSIC,
         )
-        # Audiosi bor, thumbnail bor — kutib turadi (change_thumb yoki keep_thumb)
-        pending_audio[uid] = {
-            "audio": audio,
-            "message": message,
-            "expires_at": time.time() + 300,
-            "job_id": job_id,
-            "uid": uid,
-            "has_thumbnail": True,
-        }
-        return
+        if has_thumb else
+        get_msg_no_thumbnail_prompt(config.EMOJI_WARNING)
+    )
+
+    await message.reply(prompt_msg, reply_markup=keyboard)
+
+    pending_audio[uid] = {
+        "audio": audio,
+        "message": message,
+        "expires_at": time.time() + 300,
+        "job_id": job_id,
+        "uid": uid,
+        "has_thumbnail": has_thumb,
+    }
+    pending_images[uid] = {"audio_message_id": message.message_id}
 
     await start_job_worker(bot)
 

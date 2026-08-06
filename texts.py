@@ -98,8 +98,8 @@ def translate_error_to_uzbek(error_text: str) -> str:
         return "Audio/video faylni konvertatsiya qilishda (kodlashda) xatolik yuz berdi."
     if "no thumbnail" in err_lower or "err_no_thumbnail_available" in err_lower:
         return "Audio faylda muqova rasmi topilmadi."
-    if "filenotfounderror" in err_lower or "err_output_not_created" in err_lower:
-        return "Natijaviy video fayl saqlanmadi."
+    if "filenotfounderror" in err_lower or "err_output_not_created" in err_lower or "no such file or directory" in err_lower or "errno 2" in err_lower:
+        return "Kerakli fayl topilmadi yoki Telegram serveridan yuklab bo'lmadi."
     if "download" in err_lower:
         return "Faylni Telegram serveridan yuklab bo'lmadi."
 
