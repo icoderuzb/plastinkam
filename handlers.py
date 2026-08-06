@@ -964,11 +964,10 @@ async def on_speed_selected(callback, bot: Bot):
         return
     data = callback.data.split(":", 1)[1]
     user_id = callback.from_user.id
-    if data == "full":
-        user_rotation_seconds[user_id] = 0.0
-    else:
-        user_rotation_seconds[user_id] = 60 / float(data)
-    await callback.message.edit_reply_markup(reply_markup=build_speed_keyboard(user_id))
+    try:
+        await callback.message.edit_reply_markup(reply_markup=build_speed_keyboard(user_id))
+    except TelegramBadRequest:
+        pass
     await callback.answer(get_msg_speed_saved_answer(config.EMOJI_SUCCESS))
 
 
