@@ -823,35 +823,47 @@ async def on_audio(message: Message, bot: Bot):
     # Audio thumbnail borligi tekshiriladi (Telegram thumbnail yoki fayl ichidagi rasm bilan davom etish tanlovi)
     has_thumb = bool(getattr(audio, "thumbnail", None) or getattr(audio, "thumb", None))
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=get_btn_change_thumbnail_yes(config.BTN_EMOJI_ADD_IMAGE) if has_thumb else get_btn_add_image(config.BTN_EMOJI_ADD_IMAGE),
-            callback_data="change_thumb" if has_thumb else "add_image",
-            style="primary",
-            icon_custom_emoji_id=config.BTN_EMOJI_ADD_IMAGE or None,
-        )],
-        [InlineKeyboardButton(
-            text=get_btn_keep_thumbnail(config.BTN_EMOJI_CONTINUE),
-            callback_data="keep_thumb",
-            style="success",
-            icon_custom_emoji_id=config.BTN_EMOJI_CONTINUE or None,
-        )],
-        [InlineKeyboardButton(
-            text=get_btn_cancel(config.BTN_EMOJI_CANCEL),
-            callback_data="cancel_queue",
-            style="danger",
-            icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
-        )],
-    ])
-
-    prompt_msg = (
-        get_msg_change_thumbnail_prompt(
+    if has_thumb:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text=get_btn_change_thumbnail_yes(config.BTN_EMOJI_ADD_IMAGE),
+                callback_data="change_thumb",
+                style="primary",
+                icon_custom_emoji_id=config.BTN_EMOJI_ADD_IMAGE or None,
+            )],
+            [InlineKeyboardButton(
+                text=get_btn_keep_thumbnail(config.BTN_EMOJI_CONTINUE),
+                callback_data="keep_thumb",
+                style="success",
+                icon_custom_emoji_id=config.BTN_EMOJI_CONTINUE or None,
+            )],
+            [InlineKeyboardButton(
+                text=get_btn_cancel(config.BTN_EMOJI_CANCEL),
+                callback_data="cancel_queue",
+                style="danger",
+                icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
+            )],
+        ])
+        prompt_msg = get_msg_change_thumbnail_prompt(
             emoji_id_camera=config.EMOJI_CAMERA,
             emoji_id_music=config.EMOJI_MUSIC,
         )
-        if has_thumb else
-        get_msg_no_thumbnail_prompt(config.EMOJI_WARNING)
-    )
+    else:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text=get_btn_add_image(config.BTN_EMOJI_ADD_IMAGE),
+                callback_data="add_image",
+                style="primary",
+                icon_custom_emoji_id=config.BTN_EMOJI_ADD_IMAGE or None,
+            )],
+            [InlineKeyboardButton(
+                text=get_btn_cancel(config.BTN_EMOJI_CANCEL),
+                callback_data="cancel_queue",
+                style="danger",
+                icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
+            )],
+        ])
+        prompt_msg = get_msg_no_thumbnail_prompt(config.EMOJI_WARNING)
 
     await message.reply(prompt_msg, reply_markup=keyboard)
 
