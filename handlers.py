@@ -511,22 +511,16 @@ async def process_job(bot: Bot, job: dict) -> None:
 
 def build_speed_keyboard(user_id: int) -> InlineKeyboardMarkup:
     current_key = get_user_speed_key(user_id)
-    has_speed_emoji = bool(config.BTN_EMOJI_SPEED_ACTIVE or config.BTN_EMOJI_SPEED_INACTIVE or config.BTN_EMOJI_SPEED)
     labels = [
-        (get_speed_label_full("yes" if has_speed_emoji else None), "full"),
-        (get_speed_label_8rpm("yes" if has_speed_emoji else None), "8"),
-        (get_speed_label_33rpm("yes" if has_speed_emoji else None), "33"),
-        (get_speed_label_45rpm("yes" if has_speed_emoji else None), "45"),
+        (get_speed_label_full(), "full"),
+        (get_speed_label_8rpm(), "8"),
+        (get_speed_label_33rpm(), "33"),
+        (get_speed_label_45rpm(), "45"),
     ]
     buttons = []
     for label, value in labels:
         selected = (current_key == value)
-        btn_emoji = config.BTN_EMOJI_SPEED_ACTIVE if selected else config.BTN_EMOJI_SPEED_INACTIVE
-        if not btn_emoji:
-            btn_emoji = config.BTN_EMOJI_SPEED
-
-        check_mark = " ✅" if (selected and not btn_emoji) else ""
-
+        check_mark = " ✅" if selected else ""
         buttons.append(
             InlineKeyboardButton(
                 text=f"{label}{check_mark}",
@@ -558,16 +552,16 @@ async def on_start(message: Message):
 def build_vinyl_keyboard(selected_choice: str | None = None) -> InlineKeyboardMarkup:
     """Barcha foydalanuvchilar uchun vinyl rang tanlash klaviaturasi."""
     options = [
-        ("pink", get_btn_vinyl_pink(config.BTN_EMOJI_VINYL_PINK), config.BTN_EMOJI_VINYL_PINK),
-        ("default", get_btn_vinyl_default(config.BTN_EMOJI_VINYL_DEFAULT), config.BTN_EMOJI_VINYL_DEFAULT),
-        ("yellow", get_btn_vinyl_yellow(config.BTN_EMOJI_VINYL_YELLOW), config.BTN_EMOJI_VINYL_YELLOW),
-        ("blue", get_btn_vinyl_blue(config.BTN_EMOJI_VINYL_BLUE), config.BTN_EMOJI_VINYL_BLUE),
+        ("pink", get_btn_vinyl_pink()),
+        ("default", get_btn_vinyl_default()),
+        ("yellow", get_btn_vinyl_yellow()),
+        ("blue", get_btn_vinyl_blue()),
     ]
 
     rows = []
-    for choice_key, text, emoji_id in options:
+    for choice_key, text in options:
         selected = (selected_choice == choice_key)
-        check_mark = "✅ " if (selected and not emoji_id) else ""
+        check_mark = "✅ " if selected else ""
         rows.append([
             InlineKeyboardButton(
                 text=f"{check_mark}{text}",
@@ -814,29 +808,6 @@ async def on_audio(message: Message, bot: Bot):
     }
     pending_images[uid] = {"audio_message_id": message.message_id}
 
-    await start_job_worker(bot)
-
-    job = {
-        "message": message,
-        "audio": audio,
-        "uid": uid,
-        "job_id": job_id,
-    }
-    tracked_jobs[job_id] = job
-    user_pending_jobs.setdefault(uid, set()).add(job_id)
-    enqueue_job(job)
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(
-            text=get_btn_cancel(config.BTN_EMOJI_CANCEL),
-            callback_data="cancel_queue",
-        )
-    ]])
-    await message.reply(
-        get_msg_job_queued(config.EMOJI_HOURGLASS),
-        reply_markup=keyboard,
-    )
-
 
 @router.callback_query(F.data == "cancel_queue")
 async def on_cancel_queue(callback, bot: Bot):
@@ -860,8 +831,13 @@ async def on_add_image(callback, bot: Bot):
     if not callback.from_user:
         await callback.answer()
         return
+    uid = callback.from_user.id
+    pending_entry = pending_audio.get(uid)
+    if not pending_entry:
+        await callback.answer("Kutilayotgan audio topilmadi", show_alert=True)
+        return
+    pending_images[uid] = {"waiting_for_image": True, "audio_message_id": pending_entry["message"].message_id}
     await callback.message.reply(get_msg_send_image_now(config.EMOJI_CAMERA))
-    pending_images[callback.from_user.id] = {"waiting_for_image": True}
     await callback.answer()
 
 
