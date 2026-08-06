@@ -249,6 +249,32 @@ async def download_with_retries(bot: Bot, file_id: str, destination: str,
                 chunk_size=64 * 1024,
             )
             return
+        except (FileNotFoundError, OSError) as exc:
+            # is_local=True bilan aiogram faylni mahalliy diskdan o'qishga urinadi.
+            # Agar fayl mavjud bo'lmasa, HTTP orqali Local API serveridan yuklab olamiz.
+            logger.warning("bot.download() local path not found: %s — trying HTTP fallback", exc)
+            last_error = exc
+            try:
+                file_info = await bot.get_file(file_id)
+                fp = file_info.file_path or ""
+                if fp:
+                    rel = fp
+                    if config.BOT_TOKEN in rel:
+                        rel = rel.split(config.BOT_TOKEN, 1)[1].lstrip("/\\")
+                    if config.TELEGRAM_LOCAL_API_URL:
+                        http_url = f"{config.TELEGRAM_LOCAL_API_URL.rstrip('/')}/file/bot{config.BOT_TOKEN}/{rel}"
+                    else:
+                        http_url = f"https://api.telegram.org/file/bot{config.BOT_TOKEN}/{rel}"
+                    await download_file_http(http_url, destination, timeout_seconds=timeout_seconds)
+                    if os.path.exists(destination) and os.path.getsize(destination) > 0:
+                        return
+            except Exception as http_err:
+                logger.warning("HTTP fallback after local path failure also failed: %s", http_err)
+                last_error = http_err
+            if attempt < retries:
+                await asyncio.sleep(2)
+            else:
+                raise last_error
         except Exception as exc:
             last_error = exc
             logger.warning(
@@ -438,10 +464,14 @@ async def process_job(bot: Bot, job: dict) -> None:
                 [InlineKeyboardButton(
                     text=get_btn_add_image(config.BTN_EMOJI_ADD_IMAGE),
                     callback_data="add_image",
+                    style="primary",
+                    icon_custom_emoji_id=config.BTN_EMOJI_ADD_IMAGE or None,
                 )],
                 [InlineKeyboardButton(
                     text=get_btn_cancel(config.BTN_EMOJI_CANCEL),
                     callback_data="cancel_queue",
+                    style="danger",
+                    icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
                 )],
             ])
 
@@ -511,20 +541,30 @@ async def process_job(bot: Bot, job: dict) -> None:
 
 def build_speed_keyboard(user_id: int) -> InlineKeyboardMarkup:
     current_key = get_user_speed_key(user_id)
+    has_speed_emoji = bool(config.BTN_EMOJI_SPEED_ACTIVE or config.BTN_EMOJI_SPEED_INACTIVE or config.BTN_EMOJI_SPEED)
     labels = [
-        (get_speed_label_full(), "full"),
-        (get_speed_label_8rpm(), "8"),
-        (get_speed_label_33rpm(), "33"),
-        (get_speed_label_45rpm(), "45"),
+        (get_speed_label_full("yes" if has_speed_emoji else None), "full"),
+        (get_speed_label_8rpm("yes" if has_speed_emoji else None), "8"),
+        (get_speed_label_33rpm("yes" if has_speed_emoji else None), "33"),
+        (get_speed_label_45rpm("yes" if has_speed_emoji else None), "45"),
     ]
     buttons = []
     for label, value in labels:
         selected = (current_key == value)
-        check_mark = " ✅" if selected else ""
+        btn_style = "success" if selected else "primary"
+
+        btn_emoji = config.BTN_EMOJI_SPEED_ACTIVE if selected else config.BTN_EMOJI_SPEED_INACTIVE
+        if not btn_emoji:
+            btn_emoji = config.BTN_EMOJI_SPEED
+
+        check_mark = " ✅" if (selected and not btn_emoji) else ""
+
         buttons.append(
             InlineKeyboardButton(
                 text=f"{label}{check_mark}",
                 callback_data=f"speed:{value}",
+                style=btn_style,
+                icon_custom_emoji_id=btn_emoji or None,
             )
         )
     return InlineKeyboardMarkup(inline_keyboard=[buttons[:2], buttons[2:]])
@@ -552,20 +592,23 @@ async def on_start(message: Message):
 def build_vinyl_keyboard(selected_choice: str | None = None) -> InlineKeyboardMarkup:
     """Barcha foydalanuvchilar uchun vinyl rang tanlash klaviaturasi."""
     options = [
-        ("pink", get_btn_vinyl_pink()),
-        ("default", get_btn_vinyl_default()),
-        ("yellow", get_btn_vinyl_yellow()),
-        ("blue", get_btn_vinyl_blue()),
+        ("pink", get_btn_vinyl_pink(config.BTN_EMOJI_VINYL_PINK), config.BTN_EMOJI_VINYL_PINK, "primary"),
+        ("default", get_btn_vinyl_default(config.BTN_EMOJI_VINYL_DEFAULT), config.BTN_EMOJI_VINYL_DEFAULT, "danger"),
+        ("yellow", get_btn_vinyl_yellow(config.BTN_EMOJI_VINYL_YELLOW), config.BTN_EMOJI_VINYL_YELLOW, "primary"),
+        ("blue", get_btn_vinyl_blue(config.BTN_EMOJI_VINYL_BLUE), config.BTN_EMOJI_VINYL_BLUE, "primary"),
     ]
 
     rows = []
-    for choice_key, text in options:
+    for choice_key, text, emoji_id, default_style in options:
         selected = (selected_choice == choice_key)
-        check_mark = "✅ " if selected else ""
+        style = "success" if selected else default_style
+        check_mark = "✅ " if (selected and not emoji_id) else ""
         rows.append([
             InlineKeyboardButton(
                 text=f"{check_mark}{text}",
                 callback_data=f"vinyl:{choice_key}",
+                style=style,
+                icon_custom_emoji_id=emoji_id or None,
             )
         ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -632,6 +675,8 @@ async def show_channels_admin(message: Message, session: AsyncSession):
             InlineKeyboardButton(
                 text="🗑 O'chirish",
                 callback_data=f"del_ch_{ch.id}",
+                style="danger",
+                icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
             ),
         ])
 
@@ -639,6 +684,8 @@ async def show_channels_admin(message: Message, session: AsyncSession):
         InlineKeyboardButton(
             text="➕ Yangi kanal qo'shish",
             callback_data="add_channel",
+            style="primary",
+            icon_custom_emoji_id=config.BTN_EMOJI_ADD_IMAGE or None,
         )
     ])
 
@@ -757,10 +804,14 @@ async def on_audio(message: Message, bot: Bot):
             [InlineKeyboardButton(
                 text=get_btn_continue_no_trim(config.BTN_EMOJI_CONTINUE),
                 callback_data="trim_continue",
+                style="success",
+                icon_custom_emoji_id=config.BTN_EMOJI_CONTINUE or None,
             )],
             [InlineKeyboardButton(
                 text=get_btn_cancel(config.BTN_EMOJI_CANCEL),
                 callback_data="cancel_queue",
+                style="danger",
+                icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
             )],
         ])
         await message.reply(
@@ -776,14 +827,20 @@ async def on_audio(message: Message, bot: Bot):
         [InlineKeyboardButton(
             text=get_btn_change_thumbnail_yes(config.BTN_EMOJI_ADD_IMAGE) if has_thumb else get_btn_add_image(config.BTN_EMOJI_ADD_IMAGE),
             callback_data="change_thumb" if has_thumb else "add_image",
+            style="primary",
+            icon_custom_emoji_id=config.BTN_EMOJI_ADD_IMAGE or None,
         )],
         [InlineKeyboardButton(
             text=get_btn_keep_thumbnail(config.BTN_EMOJI_CONTINUE),
             callback_data="keep_thumb",
+            style="success",
+            icon_custom_emoji_id=config.BTN_EMOJI_CONTINUE or None,
         )],
         [InlineKeyboardButton(
             text=get_btn_cancel(config.BTN_EMOJI_CANCEL),
             callback_data="cancel_queue",
+            style="danger",
+            icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
         )],
     ])
 
@@ -873,10 +930,14 @@ async def on_keep_thumb(callback, bot: Bot):
             [InlineKeyboardButton(
                 text=get_btn_continue_no_trim(config.BTN_EMOJI_CONTINUE),
                 callback_data="trim_continue",
+                style="success",
+                icon_custom_emoji_id=config.BTN_EMOJI_CONTINUE or None,
             )],
             [InlineKeyboardButton(
                 text=get_btn_cancel(config.BTN_EMOJI_CANCEL),
                 callback_data="cancel_queue",
+                style="danger",
+                icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
             )],
         ])
         await pending_entry["message"].reply(
@@ -961,10 +1022,14 @@ async def on_photo_for_audio(message: Message, bot: Bot):
             [InlineKeyboardButton(
                 text=get_btn_continue_no_trim(config.BTN_EMOJI_CONTINUE),
                 callback_data="trim_continue",
+                style="success",
+                icon_custom_emoji_id=config.BTN_EMOJI_CONTINUE or None,
             )],
             [InlineKeyboardButton(
                 text=get_btn_cancel(config.BTN_EMOJI_CANCEL),
                 callback_data="cancel_queue",
+                style="danger",
+                icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
             )],
         ])
         await message.reply(
@@ -1102,6 +1167,8 @@ async def on_trim_text(message: Message, bot: Bot):
         InlineKeyboardButton(
             text=get_btn_cancel(config.BTN_EMOJI_CANCEL),
             callback_data="cancel_queue",
+            style="danger",
+            icon_custom_emoji_id=config.BTN_EMOJI_CANCEL or None,
         )
     ]])
     await message.reply(

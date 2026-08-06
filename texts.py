@@ -218,9 +218,13 @@ def get_msg_change_thumbnail_prompt(emoji_id_camera: str | None = None, emoji_id
     )
 
 def get_btn_change_thumbnail_yes(emoji_id: str | None = None) -> str:
+    if emoji_id:
+        return "Ha, o'zgartiraman"
     return "🖼 Ha, o'zgartiraman"
 
 def get_btn_keep_thumbnail(emoji_id: str | None = None) -> str:
+    if emoji_id:
+        return "Davom etish"
     return "▶️ Davom etish"
 
 # Standart konstantalar (orqaga moslik uchun)
@@ -270,6 +274,8 @@ def get_msg_trim_invalid(emoji_id: str | None = None) -> str:
     )
 
 def get_btn_continue_no_trim(emoji_id: str | None = None) -> str:
+    if emoji_id:
+        return "Davom etish"
     return "▶️ Davom etish"
 
 BTN_CONTINUE_NO_TRIM = get_btn_continue_no_trim()
@@ -278,34 +284,54 @@ BTN_CONTINUE_NO_TRIM = get_btn_continue_no_trim()
 # handlers.py - tugma matnlari (Inline Keyboard buttons Getters & Constants)
 # ============================================================
 def get_btn_add_image(emoji_id: str | None = None) -> str:
+    if emoji_id:
+        return "Rasm qo'shish"
     return "➕ Rasm qo'shish"
 
 def get_btn_cancel(emoji_id: str | None = None) -> str:
+    if emoji_id:
+        return "Bekor qilish"
     return "❌ Bekor qilish"
 
 def get_btn_vinyl_pink(emoji_id: str | None = None) -> str:
+    if emoji_id:
+        return "Pushti rangdan foydalanish"
     return "💗 Pushti rangdan foydalanish"
 
 def get_btn_vinyl_default(emoji_id: str | None = None) -> str:
+    if emoji_id:
+        return "Oddiysidan foydalanish"
     return "🔙 Oddiysidan foydalanish"
 
 def get_btn_vinyl_yellow(emoji_id: str | None = None) -> str:
+    if emoji_id:
+        return "Sariq rang"
     return "🟡 Sariq rang"
 
 def get_btn_vinyl_blue(emoji_id: str | None = None) -> str:
+    if emoji_id:
+        return "Ko'k rang"
     return "🔵 Ko'k rang"
 
 def get_speed_label_full(emoji_id: str | None = None) -> str:
-    return "🔄 To'liq aylanish"
+    if not emoji_id:
+        return "🔄 To'liq aylanish"
+    return "To'liq aylanish"
 
 def get_speed_label_8rpm(emoji_id: str | None = None) -> str:
-    return "⚡ 8 RPM"
+    if not emoji_id:
+        return "⚡ 8 RPM"
+    return "8 RPM"
 
 def get_speed_label_33rpm(emoji_id: str | None = None) -> str:
-    return "⚡ 33 RPM"
+    if not emoji_id:
+        return "⚡ 33 RPM"
+    return "33 RPM"
 
 def get_speed_label_45rpm(emoji_id: str | None = None) -> str:
-    return "⚡ 45 RPM"
+    if not emoji_id:
+        return "⚡ 45 RPM"
+    return "45 RPM"
 
 # Standart konstantalar (orqaga moslik uchun)
 BTN_ADD_IMAGE = get_btn_add_image()
