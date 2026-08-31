@@ -760,12 +760,13 @@ def build_vinyl_keyboard(selected_choice: str | None = None) -> InlineKeyboardMa
     ]
     rows = []
     for choice_key, text, emoji_id, default_style in options:
-        selected = selected_choice == choice_key
+        selected = (selected_choice == choice_key)
         style = "success" if selected else default_style
-        check_mark = "✅ " if (selected and not emoji_id) else ""
+        clean_text = text.replace("✅ ", "").strip()
+        btn_text = f"✅ {clean_text}" if selected else clean_text
         rows.append([
             InlineKeyboardButton(
-                text=f"{check_mark}{text}",
+                text=btn_text,
                 callback_data=f"vinyl:{choice_key}",
                 style=style,
                 icon_custom_emoji_id=emoji_id or None,
@@ -876,10 +877,13 @@ async def on_start(message: Message):
 
 
 @router.message(F.text == "/rang")
-async def on_rang(message: Message):
+async def on_rang(message: Message, session: AsyncSession):
     if not message.from_user:
         return
-    current = user_vinyl_choice.get(message.from_user.id, "default")
+    uid = message.from_user.id
+    pref = await get_user_preference(session, uid)
+    current = user_vinyl_choice.get(uid, pref.preferred_vinyl or "default")
+    user_vinyl_choice[uid] = current
     await message.reply(
         get_msg_dev_choose_template(config.EMOJI_PALETTE),
         reply_markup=build_vinyl_keyboard(current),
@@ -887,14 +891,18 @@ async def on_rang(message: Message):
 
 
 @router.message(F.text == "/dev")
-async def on_dev(message: Message):
+async def on_dev(message: Message, session: AsyncSession):
     if not message.from_user or message.from_user.id != config.DEVELOPER_ID:
         return
-    current = user_vinyl_choice.get(message.from_user.id, "default")
+    uid = message.from_user.id
+    pref = await get_user_preference(session, uid)
+    current = user_vinyl_choice.get(uid, pref.preferred_vinyl or "default")
+    user_vinyl_choice[uid] = current
     await message.reply(
         get_msg_dev_choose_template(config.EMOJI_PALETTE),
         reply_markup=build_vinyl_keyboard(current),
     )
+
 
 
 @router.message(F.text == "/stats")
@@ -1593,40 +1601,67 @@ async def on_cancel_queue(callback: CallbackQuery, bot: Bot):
 
 
 @router.callback_query(F.data.startswith("vinyl:"))
-async def on_vinyl_choice(callback: CallbackQuery, bot: Bot):
+async def on_vinyl_choice(callback: CallbackQuery, bot: Bot, session: AsyncSession):
     if not callback.from_user:
         await callback.answer()
         return
     raw_choice = callback.data.split(":", 1)[1]
+    uid = callback.from_user.id
     if raw_choice in ("pink", "blue", "yellow"):
-        user_vinyl_choice[callback.from_user.id] = raw_choice
+        user_vinyl_choice[uid] = raw_choice
         choice = raw_choice
     else:
-        user_vinyl_choice.pop(callback.from_user.id, None)
+        user_vinyl_choice.pop(uid, None)
         choice = "default"
 
-    await callback.message.edit_text(
-        get_msg_vinyl_choice_saved_edit(choice, config.EMOJI_PALETTE),
-        reply_markup=build_vinyl_keyboard(choice),
-    )
+    # UserPreference ga ham saqlash
+    try:
+        pref = await get_user_preference(session, uid)
+        pref.preferred_vinyl = choice
+        await session.commit()
+    except Exception as e:
+        logger.warning("Failed to save preferred_vinyl to DB: %s", e)
+
+    try:
+        await callback.message.edit_text(
+            get_msg_vinyl_choice_saved_edit(choice, config.EMOJI_PALETTE),
+            reply_markup=build_vinyl_keyboard(choice),
+        )
+    except TelegramBadRequest:
+        pass
+    except Exception as e:
+        logger.warning("Edit message in on_vinyl_choice failed: %s", e)
+
     await callback.answer(get_msg_vinyl_choice_saved_answer(choice, config.EMOJI_SUCCESS))
 
 
 @router.callback_query(F.data.startswith("speed:"))
-async def on_speed_selected(callback: CallbackQuery, bot: Bot):
+async def on_speed_selected(callback: CallbackQuery, bot: Bot, session: AsyncSession):
     if not callback.from_user:
         await callback.answer()
         return
     data = callback.data.split(":", 1)[1]
-    user_id = callback.from_user.id
-    user_speed_choice[user_id] = data
+    uid = callback.from_user.id
+    user_speed_choice[uid] = data
+
     try:
-        await callback.message.edit_reply_markup(reply_markup=build_speed_keyboard(user_id))
+        pref = await get_user_preference(session, uid)
+        pref.preferred_speed = data
+        await session.commit()
+    except Exception as e:
+        logger.warning("Failed to save preferred_speed to DB: %s", e)
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=build_speed_keyboard(uid))
     except TelegramBadRequest:
         pass
+    except Exception as e:
+        logger.warning("Edit reply markup in on_speed_selected failed: %s", e)
+
     await callback.answer(get_msg_speed_saved_answer(config.EMOJI_SUCCESS))
 
 
 @router.message(F.video | F.voice)
 async def on_wrong_type(message: Message):
     await message.reply(get_msg_wrong_type(config.EMOJI_WARNING))
+

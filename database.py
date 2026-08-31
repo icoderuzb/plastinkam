@@ -269,15 +269,24 @@ async def db_enqueue_job(
     priority: int,
     payload_data: dict,
 ) -> PendingJob:
-    """Yangi vazifani persistent navbatga (pending_jobs) qo'shish."""
-    p_job = PendingJob(
-        job_id=job_id,
-        user_id=user_id,
-        priority=priority,
-        status="queued",
-        payload=json.dumps(payload_data),
-    )
-    session.add(p_job)
+    """Yangi vazifani persistent navbatga (pending_jobs) qo'shish yoki mavjudini yangilash."""
+    stmt = select(PendingJob).where(PendingJob.job_id == job_id)
+    result = await session.execute(stmt)
+    p_job = result.scalar_one_or_none()
+    if p_job:
+        p_job.status = "queued"
+        p_job.priority = priority
+        p_job.payload = json.dumps(payload_data)
+        p_job.updated_at = datetime.datetime.now(datetime.timezone.utc)
+    else:
+        p_job = PendingJob(
+            job_id=job_id,
+            user_id=user_id,
+            priority=priority,
+            status="queued",
+            payload=json.dumps(payload_data),
+        )
+        session.add(p_job)
     await session.commit()
     return p_job
 

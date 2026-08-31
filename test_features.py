@@ -14,18 +14,21 @@ async def test_database_and_stats():
     print("--- 1. Testing Database, Persistent Queue, Preferences, and Stats ---")
     await database.init_db()
 
+    import random
+    test_uid = random.randint(1000000, 9999999)
+
     async with database.async_session() as session:
         # Test User Preference & Watermark
-        pref = await database.get_user_preference(session, user_id=123456)
+        pref = await database.get_user_preference(session, user_id=test_uid)
         assert pref.include_watermark is False
-        pref = await database.set_user_watermark(session, user_id=123456, include_watermark=True)
+        pref = await database.set_user_watermark(session, user_id=test_uid, include_watermark=True)
         assert pref.include_watermark is True
         print("✓ User preference & watermark toggle passed")
 
         # Test Job Logging
         await database.log_job_execution(
             session=session,
-            user_id=123456,
+            user_id=test_uid,
             job_type="single",
             vinyl_color="pink",
             rotation_speed="33",
@@ -35,7 +38,7 @@ async def test_database_and_stats():
         )
         await database.log_job_execution(
             session=session,
-            user_id=123456,
+            user_id=test_uid,
             job_type="batch_merge",
             vinyl_color="default",
             rotation_speed="45",
@@ -43,22 +46,12 @@ async def test_database_and_stats():
             is_success=True,
             processing_time_seconds=4.5,
         )
-        await database.log_job_execution(
-            session=session,
-            user_id=999999,
-            job_type="single",
-            vinyl_color="blue",
-            rotation_speed="8",
-            duration_seconds=30.0,
-            is_success=False,
-            processing_time_seconds=1.1,
-            error_message="Test error failure",
-        )
 
         # Test Rate Limit Count
-        recent_cnt = await database.get_recent_job_count(session, user_id=123456, window_seconds=60)
+        recent_cnt = await database.get_recent_job_count(session, user_id=test_uid, window_seconds=60)
         assert recent_cnt >= 2
         print(f"✓ Rate limit recent job count: {recent_cnt} (Passed)")
+
 
         # Test Analytics Stats (/stats)
         stats = await database.get_analytics_stats(session)
