@@ -1,10 +1,13 @@
 import asyncio
 import glob
 import json
+import logging
 import os
 import shutil
 import tempfile
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, List
+
+logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[float], Awaitable[None]]
 
@@ -14,7 +17,6 @@ def _find_ffmpeg_binary(name: str) -> str:
     found = shutil.which(name)
     if found:
         return found
-    # winget orqali o'rnatilgan ffmpeg yo'li (Windows)
     winget_pattern = os.path.join(
         os.environ.get("LOCALAPPDATA", ""),
         "Microsoft", "WinGet", "Packages", "Gyan.FFmpeg*", "**", "bin", f"{name}.exe",
@@ -22,7 +24,7 @@ def _find_ffmpeg_binary(name: str) -> str:
     matches = glob.glob(winget_pattern, recursive=True)
     if matches:
         return matches[0]
-    return name  # Topilmasa oddiy nomini qaytaradi (PATH ga ishonadi)
+    return name
 
 
 FFPROBE = _find_ffmpeg_binary("ffprobe")
@@ -30,7 +32,6 @@ FFMPEG = _find_ffmpeg_binary("ffmpeg")
 
 # Telegramning aylana video-note (video-xabar) uchun rasmiy hajm chegarasi (aynan 12 MB)
 TELEGRAM_VIDEO_NOTE_MAX_BYTES = 12_582_912
-# Xavfsizlik zaxirasi — chegaraga tegib ketmaslik uchun (konteyner/sarlavhalardagi kichik farqlar)
 SIZE_SAFETY_MARGIN = 0.92
 MIN_VIDEO_BITRATE_BPS = 250_000
 MIN_AUDIO_BITRATE_BPS = 64_000
@@ -118,19 +119,93 @@ def compute_bitrate_budget(duration: float) -> tuple[int, int]:
         audio_bps = MIN_AUDIO_BITRATE_BPS
 
     return video_bps, audio_bps
-async def render_vinyl(disc_path: str, shadow_path: str, audio_path: str,
-                        out_path: str, rotation_seconds: float | None = 4,
-                        size: int = 640, fps: int = 30,
-                        max_duration: float = 60.0,
-                        start_offset: float = 0.0,
-                        on_progress: ProgressCallback | None = None) -> str:
+
+
+async def concat_audio_files(
+    audio_paths: List[str],
+    out_path: str,
+    max_duration: float = 60.0,
+) -> str:
+    """Bir nechta audio fayllarni bitta audio faylga birlashtiradi (Playlist/Album merge rejimi)."""
+    if not audio_paths:
+        raise ValueError("Birlashtirish uchun audio fayllar berilmadi.")
+
+    if len(audio_paths) == 1:
+        # Faqat 1 ta fayl bo'lsa, to'g'ridan-to'g'ri qisqartirib nusxalash
+        cmd = [
+            FFMPEG, "-y",
+            "-i", audio_paths[0],
+            "-t", str(max_duration),
+            "-acodec", "libmp3lame",
+            out_path,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _, err = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(f"Audio birlashtirish xatoligi: {err.decode(errors='ignore')[-300:]}")
+        return out_path
+
+    # Bir nechta audiolarni filter_complex orqali birlashtirish
+    cmd = [FFMPEG, "-y"]
+    filter_inputs = ""
+    for i, path in enumerate(audio_paths):
+        cmd.extend(["-i", path])
+        filter_inputs += f"[{i}:a]"
+
+    filter_complex = f"{filter_inputs}concat=n={len(audio_paths)}:v=0:a=1[outa]"
+    cmd.extend([
+        "-filter_complex", filter_complex,
+        "-map", "[outa]",
+        "-acodec", "libmp3lame",
+        "-t", str(max_duration),
+        out_path,
+    ])
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+    )
+    _, err = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"Audio birlashtirish xatoligi: {err.decode(errors='ignore')[-400:]}")
+
+    return out_path
+
+
+def _is_deterministic_ffmpeg_error(err_str: str) -> bool:
+    """Xatolik aniq va qayta urinishdan foyda yo'q ekanligini tekshiradi (invalid format, corrupt file va h.k.)."""
+    e = err_str.lower()
+    deterministic_keywords = [
+        "invalid data found when processing input",
+        "unknown format",
+        "codec not supported",
+        "no such file or directory",
+        "moov atom not found",
+        "invalid argument",
+        "unspecified pixel format",
+    ]
+    return any(kw in e for kw in deterministic_keywords)
+
+
+async def _render_vinyl_once(
+    disc_path: str,
+    shadow_path: str,
+    audio_path: str,
+    out_path: str,
+    rotation_seconds: float | None = 4,
+    size: int = 640,
+    fps: int = 30,
+    max_duration: float = 60.0,
+    start_offset: float = 0.0,
+    on_progress: ProgressCallback | None = None,
+) -> str:
     duration = await get_duration(audio_path)
 
-    # start_offset bo'lsa, mavjud davomiylikni moslashtirish
     if start_offset > 0:
         duration = max(0, duration - start_offset)
 
-    duration = min(duration, max_duration)  # aylana video-note uchun Telegram chegarasi
+    duration = min(duration, max_duration)
 
     if rotation_seconds is None or rotation_seconds <= 0:
         rotation_seconds = 4.0
@@ -288,3 +363,61 @@ async def render_vinyl(disc_path: str, shadow_path: str, audio_path: str,
         )
 
     return out_path
+
+
+async def render_vinyl(
+    disc_path: str,
+    shadow_path: str,
+    audio_path: str,
+    out_path: str,
+    rotation_seconds: float | None = 4,
+    size: int = 640,
+    fps: int = 30,
+    max_duration: float = 60.0,
+    start_offset: float = 0.0,
+    on_progress: ProgressCallback | None = None,
+    max_retries: int = 2,
+) -> str:
+    """FFmpeg render jarayonini vaqtinchalik xatolar uchun qayta urinish (Retry) bilan bajaradi."""
+    last_error: Exception | None = None
+
+    for attempt in range(max_retries + 1):
+        if os.path.exists(out_path):
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
+
+        try:
+            return await _render_vinyl_once(
+                disc_path=disc_path,
+                shadow_path=shadow_path,
+                audio_path=audio_path,
+                out_path=out_path,
+                rotation_seconds=rotation_seconds,
+                size=size,
+                fps=fps,
+                max_duration=max_duration,
+                start_offset=start_offset,
+                on_progress=on_progress,
+            )
+        except Exception as exc:
+            last_error = exc
+            err_msg = str(exc)
+            logger.warning(
+                "FFmpeg render urinishi %s/%s muvaffaqiyatsiz bo'ldi: %s",
+                attempt + 1, max_retries + 1, err_msg
+            )
+
+            # Agar xatolik deterministik bo'lsa (fayl buzilgan, noto'g'ri format), behuda qayta urinmaymiz
+            if _is_deterministic_ffmpeg_error(err_msg):
+                logger.info("Deterministik FFmpeg xatoligi aniqlandi, qayta urinish to'xtatildi.")
+                raise exc
+
+            if attempt < max_retries:
+                backoff_time = 1.5 * (attempt + 1)
+                await asyncio.sleep(backoff_time)
+
+    if last_error:
+        raise last_error
+    raise RuntimeError("Noma'lum render xatoligi")

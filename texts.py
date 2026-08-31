@@ -36,6 +36,7 @@ STAGE_DOWNLOADING_THUMBNAIL = "Muqova rasmi yuklab olinmoqda"
 STAGE_BUILDING_DISC = "Disk dizayni tuzilmoqda"
 STAGE_RENDERING_VIDEO = "Video tayyorlanmoqda"
 STAGE_UPLOADING_VIDEO = "Video yuklanmoqda va yuborilmoqda"
+STAGE_MERGING_AUDIO = "Audiolar birlashtirilmoqda"
 
 
 # ============================================================
@@ -227,40 +228,27 @@ def get_btn_keep_thumbnail(emoji_id: str | None = None) -> str:
         return "Davom etish"
     return "▶️ Davom etish"
 
-# Standart konstantalar (orqaga moslik uchun)
-MSG_AUDIO_RECEIVED = get_msg_audio_received()
-MSG_DURATION_TOO_LONG_FMT = get_msg_duration_too_long(60)
-MSG_PROCESSING_ERROR_FMT = get_msg_processing_error("{error_text}")
-MSG_DEV_CHOOSE_TEMPLATE = get_msg_dev_choose_template()
-MSG_START_HELP = get_msg_start_help()
-MSG_TEMPLATE_FILES_MISSING = get_msg_template_files_missing()
-MSG_NO_THUMBNAIL_PROMPT = get_msg_no_thumbnail_prompt()
-MSG_JOB_QUEUED = get_msg_job_queued()
-MSG_QUEUE_CANCELED_EDIT = get_msg_queue_canceled_edit()
-MSG_QUEUE_CANCELED_ANSWER = get_msg_queue_canceled_answer()
-MSG_SEND_IMAGE_NOW = get_msg_send_image_now()
-MSG_NO_PENDING_AUDIO = get_msg_no_pending_audio()
-MSG_AUDIO_EXPIRED = get_msg_audio_expired()
-MSG_IMAGE_RECEIVED = get_msg_image_received()
-MSG_DEV_ONLY_OPTION = "Bu variant faqat dasturchi uchun"
-MSG_VINYL_CHOICE_SAVED_EDIT = get_msg_vinyl_choice_saved_edit()
-MSG_VINYL_CHOICE_SAVED_ANSWER = get_msg_vinyl_choice_saved_answer()
-MSG_SPEED_SAVED_ANSWER = get_msg_speed_saved_answer()
-MSG_WRONG_TYPE = get_msg_wrong_type()
-
 
 # ============================================================
-# handlers.py - Audio kesish (trim) xabarlari
+# handlers.py - Audio kesish (trim) xabarlari va tugmalari
 # ============================================================
 def get_msg_trim_prompt(duration: float, emoji_id: str | None = None) -> str:
     icon = fmt_emoji("✂️", emoji_id)
     return (
         f"{icon} Audio fayl <b>{int(duration)}</b> soniya uzunligida. "
         "Maksimal chegara — 60 soniya.\n\n"
-        "Kesmoqchi bo'lsangiz <code>boshlanish:tugash</code> formatida yozing "
-        "(masalan <code>10:100</code> — 10‑soniyadan boshlab 60 soniya olinadi).\n\n"
-        "Yoki <b>Davom etish</b> tugmasini bosing — birinchi 60 soniyasi olinadi."
+        "Quyidagi qulay tugmalardan birini tanlang yoki o'zingiz "
+        "<code>boshlanish:tugash</code> formatida yozing (masalan <code>15:75</code>):"
     )
+
+def get_btn_trim_preset_start(emoji_id: str | None = None) -> str:
+    return "▶️ Boshidan 60s"
+
+def get_btn_trim_preset_middle(emoji_id: str | None = None) -> str:
+    return "⏯️ O'rtadan 60s"
+
+def get_btn_trim_preset_end(emoji_id: str | None = None) -> str:
+    return "⏹️ Oxirgi 60s"
 
 def get_msg_trim_accepted(start: int, end: int, emoji_id: str | None = None) -> str:
     icon = fmt_emoji("✅", emoji_id)
@@ -270,7 +258,7 @@ def get_msg_trim_invalid(emoji_id: str | None = None) -> str:
     icon = fmt_emoji("⚠️", emoji_id)
     return (
         f"{icon} Noto'g'ri format. <code>boshlanish:tugash</code> formatida yozing "
-        "(masalan <code>10:100</code>)."
+        "(masalan <code>10:70</code>)."
     )
 
 def get_btn_continue_no_trim(emoji_id: str | None = None) -> str:
@@ -278,10 +266,111 @@ def get_btn_continue_no_trim(emoji_id: str | None = None) -> str:
         return "Davom etish"
     return "▶️ Davom etish"
 
-BTN_CONTINUE_NO_TRIM = get_btn_continue_no_trim()
 
 # ============================================================
-# handlers.py - tugma matnlari (Inline Keyboard buttons Getters & Constants)
+# FEATURE 1: Vinyl Plastinkasi Matni (Artist / Title) Xabarlari
+# ============================================================
+def get_msg_label_text_prompt(artist: str, title: str, emoji_id: str | None = None) -> str:
+    icon = fmt_emoji("✍️", emoji_id)
+    text_display = f"<b>{artist}</b> — <i>{title}</i>" if artist or title else "<i>(aniqlanmadi)</i>"
+    return (
+        f"{icon} <b>Vinyl plastinkasiga yoziladigan matn:</b>\n"
+        f"{text_display}\n\n"
+        "Plastinkaga ijrochi va qo'shiq nomini yozishni xohlaysizmi?"
+    )
+
+def get_btn_confirm_label_text(emoji_id: str | None = None) -> str:
+    return "✅ Shu matn bilan"
+
+def get_btn_edit_label_text(emoji_id: str | None = None) -> str:
+    return "✏️ Matnni tahrirlash"
+
+def get_btn_skip_label_text(emoji_id: str | None = None) -> str:
+    return "⏩ Matnsiz chiqarish"
+
+def get_msg_label_text_input_request(emoji_id: str | None = None) -> str:
+    icon = fmt_emoji("✏️", emoji_id)
+    return (
+        f"{icon} <b>Plastinkaga yozmoqchi bo'lgan matningizni yuboring:</b>\n\n"
+        "Format: <code>Ijrochi - Qo'shiq nomi</code>\n"
+        "Misol: <code>Tohir Sodiqov - Kel</code>"
+    )
+
+def get_msg_label_text_updated(artist: str, title: str, emoji_id: str | None = None) -> str:
+    icon = fmt_emoji("✅", emoji_id)
+    return f"{icon} Matn qabul qilindi: <b>{artist}</b> — <i>{title}</i>"
+
+
+# ============================================================
+# FEATURE 2: Playlist / Album Mode Xabarlari
+# ============================================================
+def get_msg_batch_detected(count: int, emoji_id: str | None = None) -> str:
+    icon = fmt_emoji("📦", emoji_id)
+    return (
+        f"{icon} Siz <b>{count} ta</b> audio fayl yubordingiz!\n\n"
+        "Ularni qanday qayta ishlashni xohlaysiz?\n\n"
+        "• <b>Alohida-alohida</b> — har bir audio uchun alohida krujochka video tayyorlanadi.\n"
+        "• <b>Bitta qilib birlashtirish</b> — barcha audiolar bitta 60 soniyalik miks videoga ulanadi."
+    )
+
+def get_btn_batch_separate(emoji_id: str | None = None) -> str:
+    return "🗂️ Alohida-alohida"
+
+def get_btn_batch_merge(emoji_id: str | None = None) -> str:
+    return "🔗 Bitta 60s qilib birlashtirish"
+
+def get_msg_batch_summary(total: int, succeeded: int, failed: int, emoji_id: str | None = None) -> str:
+    icon = fmt_emoji("🎉", emoji_id) if failed == 0 else fmt_emoji("⚠️", emoji_id)
+    return (
+        f"{icon} <b>To'plam qayta ishlandi!</b>\n"
+        f"• Jami: {total} ta\n"
+        f"• Muvaffaqiyatli: {succeeded} ta\n"
+        f"• Xatolik: {failed} ta"
+    )
+
+
+# ============================================================
+# FEATURE 3: Watermark / Bot Imzosi
+# ============================================================
+def get_btn_watermark_toggle(enabled: bool, emoji_id: str | None = None) -> str:
+    status_icon = "Yoqilgan ✅" if enabled else "O'chirilgan ❌"
+    return f"🏷️ Watermark: {status_icon}"
+
+def get_msg_watermark_saved(enabled: bool, emoji_id: str | None = None) -> str:
+    status = "yoqildi" if enabled else "o'chirildi"
+    return f"✅ Watermark {status}"
+
+
+# ============================================================
+# FEATURE 8: Rate Limiting Xabari
+# ============================================================
+def get_msg_rate_limited(wait_seconds: int, emoji_id: str | None = None) -> str:
+    icon = fmt_emoji("⏳", emoji_id)
+    return (
+        f"{icon} <b>Juda ko'p so'rov yubordingiz!</b>\n\n"
+        f"Iltimos, serverni yuklamaslik uchun <b>{wait_seconds} soniya</b> kuting."
+    )
+
+
+# ============================================================
+# FEATURE 5: Admin /stats Paneli
+# ============================================================
+def get_msg_stats_report(stats: dict, emoji_id: str | None = None) -> str:
+    icon = fmt_emoji("📊", emoji_id)
+    return (
+        f"{icon} <b>Plastinkam Bot — Statistika Paneli</b>\n\n"
+        f"🎬 <b>Tayyorlangan videolar (Jami):</b> <code>{stats.get('total_videos', 0)}</code> ta\n"
+        f"📅 <b>Bugun:</b> <code>{stats.get('today_videos', 0)}</code> ta\n"
+        f"📆 <b>Shu hafta:</b> <code>{stats.get('week_videos', 0)}</code> ta\n"
+        f"🗓 <b>Shu oy:</b> <code>{stats.get('month_videos', 0)}</code> ta\n\n"
+        f"🎨 <b>Eng ommabop rang:</b> <code>{stats.get('top_color', 'Mavjud emas')}</code>\n"
+        f"⚡ <b>Eng ko'p tanlangan tezlik:</b> <code>{stats.get('top_speed', 'Mavjud emas')}</code>\n\n"
+        f"📉 <b>Oxirgi 50 ta so'rovdagi xatolik darajasi:</b> <code>{stats.get('failure_rate', '0%')}</code>"
+    )
+
+
+# ============================================================
+# Tugma matnlari (Inline Keyboard buttons Getters & Constants)
 # ============================================================
 def get_btn_add_image(emoji_id: str | None = None) -> str:
     if emoji_id:
@@ -336,7 +425,6 @@ def get_speed_label_45rpm(emoji_id: str | None = None) -> str:
 # Standart konstantalar (orqaga moslik uchun)
 BTN_ADD_IMAGE = get_btn_add_image()
 BTN_CANCEL = get_btn_cancel()
-
 BTN_VINYL_PINK = get_btn_vinyl_pink()
 BTN_VINYL_DEFAULT = get_btn_vinyl_default()
 BTN_VINYL_YELLOW = get_btn_vinyl_yellow()
@@ -347,4 +435,4 @@ SPEED_LABEL_8RPM = get_speed_label_8rpm()
 SPEED_LABEL_33RPM = get_speed_label_33rpm()
 SPEED_LABEL_45RPM = get_speed_label_45rpm()
 
-
+MSG_DEV_ONLY_OPTION = "Bu variant faqat dasturchi uchun"
