@@ -1223,9 +1223,12 @@ async def on_batch_separate(callback: CallbackQuery, bot: Bot):
 
     items = batch["items"]
     msg = batch["message"]
-    await callback.message.edit_text(
-        f"🧵 <b>{len(items)} ta audio navbatga qo'shildi</b>, har biri alohida tayyorlanadi."
-    )
+    try:
+        await callback.message.edit_text(
+            f"🧵 <b>{len(items)} ta audio navbatga qo'shildi</b>, har biri alohida tayyorlanadi."
+        )
+    except TelegramBadRequest:
+        pass
     await callback.answer()
 
     await start_job_worker(bot)
@@ -1264,9 +1267,12 @@ async def on_batch_merge(callback: CallbackQuery, bot: Bot):
     msg = batch["message"]
     j_id = uuid.uuid4().hex
 
-    await callback.message.edit_text(
-        f"🔗 <b>{len(items)} ta audio bitta miks videoga birlashtirilmoqda...</b>"
-    )
+    try:
+        await callback.message.edit_text(
+            f"🔗 <b>{len(items)} ta audio bitta miks videoga birlashtirilmoqda...</b>"
+        )
+    except TelegramBadRequest:
+        pass
     await callback.answer()
 
     await start_job_worker(bot)
@@ -1305,8 +1311,12 @@ async def on_trim_preset(callback: CallbackQuery, bot: Bot):
     start = int(parts[1])
     end = int(parts[2])
 
-    await callback.message.edit_text(get_msg_trim_accepted(start, end, config.EMOJI_SUCCESS))
+    try:
+        await callback.message.edit_text(get_msg_trim_accepted(start, end, config.EMOJI_SUCCESS))
+    except TelegramBadRequest:
+        pass
     await callback.answer()
+
 
     await start_job_worker(bot)
     job = {
@@ -1489,7 +1499,10 @@ async def on_keep_thumb(callback: CallbackQuery, bot: Bot):
     audio = pending_entry["audio"]
     job_id = pending_entry["job_id"]
 
-    await callback.message.edit_text(get_msg_job_queued(config.EMOJI_HOURGLASS))
+    try:
+        await callback.message.edit_text(get_msg_job_queued(config.EMOJI_HOURGLASS))
+    except TelegramBadRequest:
+        pass
     await callback.answer()
 
     await start_job_worker(bot)
