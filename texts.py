@@ -283,22 +283,34 @@ def get_btn_confirm_label_text(emoji_id: str | None = None) -> str:
     return "✅ Shu matn bilan"
 
 def get_btn_edit_label_text(emoji_id: str | None = None) -> str:
-    return "✏️ Matnni tahrirlash"
+    return "✏️ Matnni o'zgartirish"
 
 def get_btn_skip_label_text(emoji_id: str | None = None) -> str:
     return "⏩ Matnsiz chiqarish"
 
 def get_msg_label_text_input_request(emoji_id: str | None = None) -> str:
-    icon = fmt_emoji("✏️", emoji_id)
+    icon = fmt_emoji("✍️", emoji_id)
     return (
-        f"{icon} <b>Plastinkaga yozmoqchi bo'lgan matningizni yuboring:</b>\n\n"
-        "Format: <code>Ijrochi - Qo'shiq nomi</code>\n"
-        "Misol: <code>Tohir Sodiqov - Kel</code>"
+        f"{icon} <b>Plastinkaga yoziladigan matnni yuboring:</b>\n\n"
+        "Quyidagi qulay formatlardan birida yozishingiz mumkin:\n\n"
+        "• <code>Ijrochi - Qo'shiq nomi</code>\n"
+        "  <i>(Masalan: BØRNS - Past Lives)</i>\n\n"
+        "• Yoki alohida 2 qatorda:\n"
+        "  <code>BØRNS</code> <i>(tepadagi yoyda)</i>\n"
+        "  <code>Past Lives</code> <i>(pastdagi yoyda)</i>\n\n"
+        "• Agar faqat qo'shiq nomi kerak bo'lsa, bitta qatorda nomini o'zini yuboring."
     )
 
 def get_msg_label_text_updated(artist: str, title: str, emoji_id: str | None = None) -> str:
     icon = fmt_emoji("✅", emoji_id)
-    return f"{icon} Matn qabul qilindi: <b>{artist}</b> — <i>{title}</i>"
+    artist_part = f"\n👤 <b>Tepadagi yoy:</b> {artist}" if artist else ""
+    title_part = f"\n💿 <b>Pastdagi yoy:</b> {title}" if title else ""
+    return (
+        f"{icon} <b>Plastinka matni qabul qilindi!</b>"
+        f"{artist_part}"
+        f"{title_part}\n\n"
+        "Davom etish uchun <b>«Davom etish»</b> tugmasini bosing yoki rasm yuboring:"
+    )
 
 
 # ============================================================

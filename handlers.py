@@ -831,19 +831,24 @@ def build_confirmation_keyboard(include_watermark: bool, has_metadata: bool = Tr
         ],
     ]
 
-    if config.ENABLE_LABEL_TEXT and has_metadata:
-        rows.append([
+    if config.ENABLE_LABEL_TEXT:
+        edit_btn_text = get_btn_edit_label_text() if has_metadata else "✍️ Matn kiritish"
+        label_row = [
             InlineKeyboardButton(
-                text=get_btn_edit_label_text(),
+                text=edit_btn_text,
                 callback_data="label_edit",
                 style="primary",
-            ),
-            InlineKeyboardButton(
-                text=get_btn_skip_label_text(),
-                callback_data="label_skip",
-                style="primary",
-            ),
-        ])
+            )
+        ]
+        if has_metadata:
+            label_row.append(
+                InlineKeyboardButton(
+                    text=get_btn_skip_label_text(),
+                    callback_data="label_skip",
+                    style="primary",
+                )
+            )
+        rows.append(label_row)
 
     rows.append([
         InlineKeyboardButton(
@@ -1345,24 +1350,46 @@ async def on_text_message(message: Message, bot: Bot, state: FSMContext):
         return
     uid = message.from_user.id
 
-    # 1. EditLabelTextState FSM tekshiruvi (Feature 1)
+    raw_text = (message.text or "").strip()
+
+    # 1. EditLabelTextState FSM tekshiruvi (Feature 1) yoki pending_audio kutilayotganda matn kiritish
     current_state = await state.get_state()
-    if current_state == EditLabelTextState.waiting_for_text:
-        text = (message.text or "").strip()
+    is_label_state = (current_state == EditLabelTextState.waiting_for_text)
+    pending_entry = pending_audio.get(uid)
+    trim_data = pending_trim.get(uid)
+    is_trim_format = bool(re.match(r"^(\d+)\s*:\s*(\d+)$", raw_text))
+
+    if is_label_state or (pending_entry and not trim_data and not is_trim_format):
         artist = ""
-        title = text
-        if " - " in text:
-            parts = text.split(" - ", 1)
+        title = ""
+
+        # 2 qatorli format: 1-qator: Ijrochi, 2-qator: Qo'shiq nomi
+        if "\n" in raw_text:
+            lines = [l.strip() for l in raw_text.split("\n") if l.strip()]
+            if len(lines) >= 2:
+                artist = lines[0]
+                title = lines[1]
+            elif len(lines) == 1:
+                title = lines[0]
+        # " - ", " — ", " / " kabi ajratuvchilar
+        elif " - " in raw_text or " — " in raw_text or " / " in raw_text:
+            delim = " - " if " - " in raw_text else (" — " if " — " in raw_text else " / ")
+            parts = raw_text.split(delim, 1)
             artist = parts[0].strip()
             title = parts[1].strip()
+        else:
+            # Bitta satr bo'lsa — qo'shiq nomi
+            title = raw_text
 
-        pending_entry = pending_audio.get(uid)
+        include_wm = False
         if pending_entry:
             pending_entry["artist"] = artist
             pending_entry["title"] = title
+            include_wm = pending_entry.get("include_watermark", False)
 
         await state.clear()
-        await message.reply(get_msg_label_text_updated(artist, title, config.EMOJI_SUCCESS))
+        kb = build_confirmation_keyboard(include_watermark=include_wm, has_metadata=bool(artist or title))
+        await message.reply(get_msg_label_text_updated(artist, title, config.EMOJI_SUCCESS), reply_markup=kb)
         return
 
     # 2. Qo'lda Trim oraliq kiritish (masalan 15:75)
