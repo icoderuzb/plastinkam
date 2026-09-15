@@ -1185,12 +1185,17 @@ async def _handle_single_audio(message: Message, audio: Any, bot: Bot):
 
     # 2. Cover / Label Text / Watermark Confirmation
     has_thumb = bool(getattr(audio, "thumbnail", None) or getattr(audio, "thumb", None))
-    prompt_msg = get_msg_change_thumbnail_prompt(
-        emoji_id_camera=config.EMOJI_CAMERA,
-        emoji_id_music=config.EMOJI_MUSIC,
+    artist_display = f"<b>{performer}</b>" if performer else "<i>(kiritilmagan)</i>"
+    title_display = f"<i>{title}</i>" if title else "<i>(kiritilmagan)</i>"
+
+    prompt_msg = (
+        f"🎵 <b>Audio qabul qilindi!</b>\n\n"
+        f"✍️ <b>Plastinkaga yoziladigan matn:</b>\n"
+        f"👤 <b>Ijrochi (tepada):</b> {artist_display}\n"
+        f"💿 <b>Qo'shiq nomi (pastda):</b> {title_display}\n\n"
+        f"👉 <b>Boshqa matn yozmoqchi bo'lsangiz</b> — xabar sifatida yuboring (masalan: <code>Ijrochi - Qo'shiq nomi</code>) yoki «✏️ Matnni o'zgartirish» tugmasini bosing.\n\n"
+        f"🖼 <b>Rasmni almashtirish</b> uchun «Ha, o'zgartiraman» tugmasini bosing:"
     )
-    if performer or title:
-        prompt_msg += f"\n\n✍️ <i>Aniqlangan matn:</i> <b>{performer}</b> — <i>{title}</i>"
 
     keyboard = build_confirmation_keyboard(include_watermark=include_watermark, has_metadata=bool(performer or title))
     await safe_reply_keyboard(message, prompt_msg, reply_markup=keyboard)
@@ -1542,6 +1547,9 @@ async def on_keep_thumb(callback: CallbackQuery, bot: Bot):
         "title": pending_entry.get("title"),
         "include_watermark": pending_entry.get("include_watermark", False),
     }
+    if pending_entry.get("thumbnail_file_id"):
+        job["thumbnail_file_id"] = pending_entry["thumbnail_file_id"]
+
     tracked_jobs[job_id] = job
     user_pending_jobs.setdefault(uid, set()).add(job_id)
     await enqueue_job(job)
@@ -1599,22 +1607,30 @@ async def on_photo_for_audio(message: Message, bot: Bot):
         return
 
     photo = message.photo[-1]
-    job = pending_entry
-    job["thumbnail_file_id"] = photo.file_id
-    job["message"] = pending_entry["message"]
-    job["uid"] = uid
-    job["job_id"] = pending_entry["job_id"]
-
-    pending_audio.pop(uid, None)
+    pending_entry["thumbnail_file_id"] = photo.file_id
     pending_images.pop(uid, None)
 
-    await message.reply(get_msg_image_received(config.EMOJI_SUCCESS))
+    artist = pending_entry.get("artist") or ""
+    title = pending_entry.get("title") or ""
+    include_wm = pending_entry.get("include_watermark", False)
 
-    tracked_jobs[job["job_id"]] = job
-    user_pending_jobs.setdefault(job["uid"], set()).add(job["job_id"])
+    kb = build_confirmation_keyboard(
+        include_watermark=include_wm,
+        has_metadata=bool(artist or title)
+    )
 
-    await start_job_worker(bot)
-    await enqueue_job(job)
+    artist_str = f"<b>{artist}</b>" if artist else "<i>(kiritilmagan)</i>"
+    title_str = f"<i>{title}</i>" if title else "<i>(kiritilmagan)</i>"
+
+    reply_text = (
+        f"✅ <b>Rasm qabul qilindi!</b>\n\n"
+        f"✍️ <b>Plastinkaga yoziladigan matn:</b>\n"
+        f"👤 <b>Ijrochi (tepada):</b> {artist_str}\n"
+        f"💿 <b>Qo'shiq nomi (pastda):</b> {title_str}\n\n"
+        f"👉 <b>Boshqa matn yozmoqchi bo'lsangiz</b> — to'g'ridan-to'g'ri xabar yuboring (masalan: <code>Ijrochi - Qo'shiq nomi</code>) yoki «✏️ Matnni o'zgartirish» tugmasini bosing.\n\n"
+        f"Tayyor bo'lsangiz, <b>«Davom etish»</b> tugmasini bosing:"
+    )
+    await message.reply(reply_text, reply_markup=kb)
 
 
 @router.callback_query(F.data == "cancel_queue")
