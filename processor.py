@@ -30,9 +30,11 @@ def _find_ffmpeg_binary(name: str) -> str:
 FFPROBE = _find_ffmpeg_binary("ffprobe")
 FFMPEG = _find_ffmpeg_binary("ffmpeg")
 
-# Telegramning aylana video-note (video-xabar) uchun rasmiy hajm chegarasi (aynan 12 MB)
-TELEGRAM_VIDEO_NOTE_MAX_BYTES = 12_582_912
-SIZE_SAFETY_MARGIN = 0.92
+# Telegramning video-note (dumaloq video-xabar) uchun Bot API rasmiy hajm chegarasi (20 MB)
+TELEGRAM_VIDEO_NOTE_MAX_BYTES = 20_971_520
+# Video tez yuklanishi va tejamkor bo'lishi uchun mo'ljallangan maqsadli hajm (~11-12 MB)
+TARGET_VIDEO_NOTE_MAX_BYTES = 12_582_912
+SIZE_SAFETY_MARGIN = 0.90
 MIN_VIDEO_BITRATE_BPS = 250_000
 MIN_AUDIO_BITRATE_BPS = 64_000
 MAX_AUDIO_BITRATE_BPS = 128_000
@@ -108,7 +110,7 @@ async def extract_embedded_cover(audio_path: str, out_image_path: str) -> bool:
 def compute_bitrate_budget(duration: float) -> tuple[int, int]:
     """Natijaviy hajm Telegram chegarasidan oshmasligi uchun video/audio bitreytni (bps) hisoblaydi."""
     duration = max(duration, 1.0)
-    target_total_bits = TELEGRAM_VIDEO_NOTE_MAX_BYTES * 8 * SIZE_SAFETY_MARGIN
+    target_total_bits = TARGET_VIDEO_NOTE_MAX_BYTES * 8 * SIZE_SAFETY_MARGIN
     target_total_bps = target_total_bits / duration
 
     audio_bps = min(MAX_AUDIO_BITRATE_BPS, max(MIN_AUDIO_BITRATE_BPS, int(target_total_bps * 0.15)))
@@ -184,6 +186,7 @@ def _is_deterministic_ffmpeg_error(err_str: str) -> bool:
         "moov atom not found",
         "invalid argument",
         "unspecified pixel format",
+        "telegram chegarasidan",
     ]
     return any(kw in e for kw in deterministic_keywords)
 
@@ -208,7 +211,7 @@ async def _render_vinyl_once(
     duration = min(duration, max_duration)
 
     if rotation_seconds is None or rotation_seconds <= 0:
-        rotation_seconds = 4.0
+        rotation_seconds = duration if duration > 0 else 4.0
 
     video_bps, audio_bps = compute_bitrate_budget(duration)
 
@@ -235,8 +238,16 @@ async def _render_vinyl_once(
         if trim_proc.returncode != 0:
             raise RuntimeError(f"ffmpeg audio qisqartirish xatoligi: {trim_err.decode(errors='ignore')[-500:]}")
 
-        # 2. Render 1 seamless rotation loop (fast 4-second loop render)
-        loop_dur = min(rotation_seconds, duration)
+        # 2. Render 1 seamless rotation loop
+        # Agar aylanish vaqti qisqa bo'lsa (masalan 33 RPM: 1.8s, 45 RPM: 1.33s),
+        # har bir aylanishda I-frame takrorlanib umumiy hajm shishib ketmasligi uchun
+        # kamida 3.5 - 5 soniya atrofidagi to'liq aylanishlar miqdorini olamiz
+        if rotation_seconds < duration:
+            num_rotations = max(1, int(round(4.0 / rotation_seconds)))
+            loop_dur = min(rotation_seconds * num_rotations, duration)
+        else:
+            loop_dur = duration
+
         filt_loop = (
             f"[0:v]format=rgba,rotate=2*PI*t/{rotation_seconds}:c=none:ow={size}:oh={size}[spin];"
             f"[spin][1:v]overlay=0:0:format=auto[vout]"
@@ -247,10 +258,10 @@ async def _render_vinyl_once(
             "-loop", "1", "-i", shadow_path,
             "-filter_complex", filt_loop,
             "-map", "[vout]",
-            "-c:v", "libx264", "-preset", "ultrafast",
+            "-c:v", "libx264", "-preset", "veryfast",
             "-threads", "0",
-            "-b:v", str(video_bps), "-maxrate", str(int(video_bps * 1.15)),
-            "-bufsize", str(video_bps * 2),
+            "-b:v", str(video_bps), "-maxrate", str(video_bps),
+            "-bufsize", str(video_bps),
             "-t", str(loop_dur),
             "-r", str(fps),
             "-pix_fmt", "yuv420p",
@@ -288,10 +299,10 @@ async def _render_vinyl_once(
                 "-loop", "1", "-i", shadow_path,
                 "-filter_complex", filt,
                 "-map", "[vout]", "-map", "0:a",
-                "-c:v", "libx264", "-preset", "ultrafast",
+                "-c:v", "libx264", "-preset", "veryfast",
                 "-threads", "0",
-                "-b:v", str(video_bps), "-maxrate", str(int(video_bps * 1.15)),
-                "-bufsize", str(video_bps * 2),
+                "-b:v", str(video_bps), "-maxrate", str(video_bps),
+                "-bufsize", str(video_bps),
                 "-c:a", "aac", "-b:a", str(audio_bps),
                 "-t", str(duration),
                 "-r", str(fps),
@@ -356,6 +367,38 @@ async def _render_vinyl_once(
                 pass
 
     actual_size = os.path.getsize(out_path)
+    if actual_size > TELEGRAM_VIDEO_NOTE_MAX_BYTES:
+        logger.warning(
+            "Natijaviy video hajmi (%d bayt) Telegram chegarasidan (%d bayt) oshdi. Qayta siqilmoqda...",
+            actual_size, TELEGRAM_VIDEO_NOTE_MAX_BYTES
+        )
+        compressed_path = tempfile.mktemp(suffix=".comp.mp4")
+        try:
+            comp_cmd = [
+                FFMPEG, "-y",
+                "-i", out_path,
+                "-c:v", "libx264", "-crf", "30", "-preset", "veryfast",
+                "-c:a", "copy",
+                "-movflags", "+faststart",
+                "-threads", "0",
+                compressed_path,
+            ]
+            proc_comp = await asyncio.create_subprocess_exec(
+                *comp_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            )
+            await proc_comp.communicate()
+            if proc_comp.returncode == 0 and os.path.exists(compressed_path):
+                comp_size = os.path.getsize(compressed_path)
+                if comp_size < actual_size:
+                    shutil.move(compressed_path, out_path)
+                    actual_size = comp_size
+        finally:
+            if os.path.exists(compressed_path):
+                try:
+                    os.remove(compressed_path)
+                except OSError:
+                    pass
+
     if actual_size > TELEGRAM_VIDEO_NOTE_MAX_BYTES:
         raise RuntimeError(
             f"Natijaviy video hajmi ({actual_size} bayt) bitreyt sozlashiga qaramay "
